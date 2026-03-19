@@ -46,6 +46,8 @@ const int DART_EXTRA_STEP_DEG   = 2;
 int LAZY_STEP_DELAY_MS    = 10;
 int PLAYFUL_STEP_DELAY_MS = 6;
 int ZOOMIES_STEP_DELAY_MS = 4;
+int AUTO_REST_MIN_MINUTES = 2;
+int AUTO_REST_MAX_MINUTES = 5;
 
 const unsigned long STARTUP_WARMUP_MS = 5000UL;
 const unsigned long MODE_SWITCH_RESTART_DELAY_MS = 1500UL;
@@ -120,6 +122,13 @@ bool validateStepDelayMs(int value) {
   return value >= 2 && value <= 25;
 }
 
+bool validateRestWindowMinutes(int minMinutes, int maxMinutes) {
+  if (minMinutes < 1 || minMinutes > 240) return false;
+  if (maxMinutes < 1 || maxMinutes > 240) return false;
+  if (maxMinutes < minMinutes) return false;
+  return true;
+}
+
 bool extractJsonInt(const String& json, const char* key, int& valueOut) {
   String quotedKey = String("\"") + key + "\"";
   int keyPos = json.indexOf(quotedKey);
@@ -153,6 +162,10 @@ int maxSafeAmplitude() {
   int rightRoom = SERVO_MAX_DEG - SERVO_REST_DEG;
   int safeRoom = min2(leftRoom, rightRoom);
   return max2(0, safeRoom);
+}
+
+unsigned long minutesToMs(int minutes) {
+  return (unsigned long)minutes * 60UL * 1000UL;
 }
 
 PlayMode readModeSwitch() {
@@ -218,13 +231,8 @@ unsigned long sessionDurationMsForMode(PlayMode mode) {
   return 30000UL;
 }
 
-unsigned long restDurationMsForMode(PlayMode mode) {
-  switch (mode) {
-    case MODE_LAZY:     return randRangeUL(4UL * 60UL * 1000UL, 7UL * 60UL * 1000UL);
-    case MODE_PLAYFUL:  return randRangeUL(2UL * 60UL * 1000UL + 30000UL, 5UL * 60UL * 1000UL);
-    case MODE_ZOOMIES:  return randRangeUL(90UL * 1000UL, 4UL * 60UL * 1000UL);
-  }
-  return 3UL * 60UL * 1000UL;
+unsigned long restDurationMs() {
+  return randRangeUL(minutesToMs(AUTO_REST_MIN_MINUTES), minutesToMs(AUTO_REST_MAX_MINUTES));
 }
 
 int teaseSpeedForMode(PlayMode mode) {
@@ -415,6 +423,12 @@ void applyStepDelays(int lazyMs, int playfulMs, int zoomiesMs) {
   settingsChanged = true;
 }
 
+void applyRestWindowMinutes(int minMinutes, int maxMinutes) {
+  AUTO_REST_MIN_MINUTES = minMinutes;
+  AUTO_REST_MAX_MINUTES = maxMinutes;
+  settingsChanged = true;
+}
+
 bool saveConfig() {
   if (!littleFsReady) return false;
 
@@ -434,6 +448,10 @@ bool saveConfig() {
   json += String(PLAYFUL_STEP_DELAY_MS);
   json += ",\"zoomiesStepDelayMs\":";
   json += String(ZOOMIES_STEP_DELAY_MS);
+  json += ",\"autoRestMinMinutes\":";
+  json += String(AUTO_REST_MIN_MINUTES);
+  json += ",\"autoRestMaxMinutes\":";
+  json += String(AUTO_REST_MAX_MINUTES);
   json += "}\n";
 
   size_t written = file.print(json);
@@ -469,6 +487,8 @@ void loadConfig() {
   int savedLazyDelay = LAZY_STEP_DELAY_MS;
   int savedPlayfulDelay = PLAYFUL_STEP_DELAY_MS;
   int savedZoomiesDelay = ZOOMIES_STEP_DELAY_MS;
+  int savedRestMinMinutes = AUTO_REST_MIN_MINUTES;
+  int savedRestMaxMinutes = AUTO_REST_MAX_MINUTES;
 
   if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
       !extractJsonInt(json, "servoMaxDeg", savedMax)) {
@@ -499,6 +519,16 @@ void loadConfig() {
     Serial.println("Saved speed settings invalid. Using default speed settings.");
   }
 
+  bool hasRestMinMinutes = extractJsonInt(json, "autoRestMinMinutes", savedRestMinMinutes);
+  bool hasRestMaxMinutes = extractJsonInt(json, "autoRestMaxMinutes", savedRestMaxMinutes);
+
+  if (hasRestMinMinutes && hasRestMaxMinutes &&
+      validateRestWindowMinutes(savedRestMinMinutes, savedRestMaxMinutes)) {
+    applyRestWindowMinutes(savedRestMinMinutes, savedRestMaxMinutes);
+  } else if (hasRestMinMinutes || hasRestMaxMinutes) {
+    Serial.println("Saved rest window is invalid. Using default rest window.");
+  }
+
   Serial.print("Loaded servo window from LittleFS: ");
   Serial.print(SERVO_MIN_DEG);
   Serial.print(" to ");
@@ -509,6 +539,10 @@ void loadConfig() {
   Serial.print(PLAYFUL_STEP_DELAY_MS);
   Serial.print(", ");
   Serial.println(ZOOMIES_STEP_DELAY_MS);
+  Serial.print("Loaded rest window (minutes): ");
+  Serial.print(AUTO_REST_MIN_MINUTES);
+  Serial.print(" to ");
+  Serial.println(AUTO_REST_MAX_MINUTES);
 }
 
 bool canAutoStartSessions() {
@@ -683,7 +717,7 @@ void finishSession(PlayMode modeAtEnd) {
     Serial.print((nextAutoSessionMs - lastSessionEndMs) / 1000.0);
     Serial.println(" s");
   } else {
-    nextAutoSessionMs = lastSessionEndMs + restDurationMsForMode(modeAtEnd);
+    nextAutoSessionMs = lastSessionEndMs + restDurationMs();
 
     Serial.print("Session complete. Next auto session in ");
     Serial.print((nextAutoSessionMs - lastSessionEndMs) / 1000UL);
@@ -745,7 +779,11 @@ String htmlPage() {
   page += String(SERVO_REST_DEG);
   page += F("&deg;</div><div><strong>Current swing from rest:</strong> up to ");
   page += String(maxSafeAmplitude());
-  page += F("&deg; each side</div>");
+  page += F("&deg; each side</div><div><strong>Auto rest window:</strong> ");
+  page += String(AUTO_REST_MIN_MINUTES);
+  page += F(" to ");
+  page += String(AUTO_REST_MAX_MINUTES);
+  page += F(" min</div>");
 
   if (controllerState == STATE_STARTUP) {
     unsigned long warmupRemainingMs = (startupEndMs > now) ? (startupEndMs - now) : 0;
@@ -778,6 +816,10 @@ String htmlPage() {
             "<p class='meta'>These speed settings control how many milliseconds the sketch waits between small servo steps. Lower numbers move faster. Higher numbers move slower and softer.</p>"
             "<p class='meta'>Change these gradually. If you set them too low, motion can get jerky or mechanically harsh.</p></div>");
 
+  page += F("<div class='card hint'><strong>How to slow down automatic play</strong>"
+            "<p class='meta'>The rest window below controls how long the toy waits between sessions when left running on its own. The sketch picks a random rest time between the minimum and maximum you set.</p>"
+            "<p class='meta'>Use a longer window if you want the toy available all day without constant stimulation.</p></div>");
+
   page += F("<div class='card'><form action='/set' method='get'>");
   page += F("<label for='min'>Left limit / minimum angle (SERVO_MIN_DEG)</label>");
   page += F("<input id='min' name='min' type='number' min='0' max='170' value='");
@@ -804,11 +846,22 @@ String htmlPage() {
   page += String(ZOOMIES_STEP_DELAY_MS);
   page += F("'>");
 
+  page += F("<label for='restMinMinutes'>Minimum rest between sessions in minutes</label>");
+  page += F("<input id='restMinMinutes' name='restMinMinutes' type='number' min='1' max='240' value='");
+  page += String(AUTO_REST_MIN_MINUTES);
+  page += F("'>");
+
+  page += F("<label for='restMaxMinutes'>Maximum rest between sessions in minutes</label>");
+  page += F("<input id='restMaxMinutes' name='restMaxMinutes' type='number' min='1' max='240' value='");
+  page += String(AUTO_REST_MAX_MINUTES);
+  page += F("'>");
+
   page += F("<button type='submit'>Apply</button>");
   page += F("</form>");
   page += F("<p class='meta'>For safety this sketch requires max &gt; min and at least 20 degrees of spread. "
             "When you apply a new window, the rest position is re-centered automatically and the setting is saved to LittleFS for the next boot.</p>");
   page += F("<p class='meta'>Speed delay range is 2-25 ms. Lower is faster.</p>");
+  page += F("<p class='meta'>Rest window range is 1-240 minutes. Normal automatic sessions restart after a random pause inside that window. Mode-switch restarts stay fast.</p>");
   page += F("</div>");
 
   page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
@@ -827,9 +880,12 @@ void handleSet() {
   bool hasLazyArg = server.hasArg("lazyDelay") || server.hasArg("beginnerDelay");
   bool hasPlayfulArg = server.hasArg("playfulDelay") || server.hasArg("intermediateDelay");
   bool hasZoomiesArg = server.hasArg("zoomiesDelay") || server.hasArg("advancedDelay");
+  bool hasRestMinArg = server.hasArg("restMinMinutes");
+  bool hasRestMaxArg = server.hasArg("restMaxMinutes");
 
   if (!server.hasArg("min") || !server.hasArg("max") ||
-      !hasLazyArg || !hasPlayfulArg || !hasZoomiesArg) {
+      !hasLazyArg || !hasPlayfulArg || !hasZoomiesArg ||
+      !hasRestMinArg || !hasRestMaxArg) {
     server.send(400, "text/plain", "Missing one or more required parameters.");
     return;
   }
@@ -842,6 +898,8 @@ void handleSet() {
                                                       : server.arg("intermediateDelay").toInt();
   int newZoomiesDelay = server.hasArg("zoomiesDelay") ? server.arg("zoomiesDelay").toInt()
                                                       : server.arg("advancedDelay").toInt();
+  int newRestMinMinutes = server.arg("restMinMinutes").toInt();
+  int newRestMaxMinutes = server.arg("restMaxMinutes").toInt();
 
   if (!validateServoWindow(newMin, newMax)) {
     server.send(400, "text/plain",
@@ -856,8 +914,15 @@ void handleSet() {
     return;
   }
 
+  if (!validateRestWindowMinutes(newRestMinMinutes, newRestMaxMinutes)) {
+    server.send(400, "text/plain",
+                "Rest window must stay between 1 and 240 minutes, with max greater than or equal to min.");
+    return;
+  }
+
   applyServoWindow(newMin, newMax);
   applyStepDelays(newLazyDelay, newPlayfulDelay, newZoomiesDelay);
+  applyRestWindowMinutes(newRestMinMinutes, newRestMaxMinutes);
 
   if (!saveConfig()) {
     server.send(500, "text/plain",
@@ -875,6 +940,10 @@ void handleSet() {
   Serial.print(PLAYFUL_STEP_DELAY_MS);
   Serial.print(", ");
   Serial.println(ZOOMIES_STEP_DELAY_MS);
+  Serial.print("Updated rest window (minutes): ");
+  Serial.print(AUTO_REST_MIN_MINUTES);
+  Serial.print(" to ");
+  Serial.println(AUTO_REST_MAX_MINUTES);
 
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
@@ -891,7 +960,7 @@ void handleStart() {
 void handlePark() {
   parkRequested = true;
   forceSessionRequested = false;
-  nextAutoSessionMs = millis() + restDurationMsForMode(readModeSwitch());
+  nextAutoSessionMs = millis() + restDurationMs();
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
 }
