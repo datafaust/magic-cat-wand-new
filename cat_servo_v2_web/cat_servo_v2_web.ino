@@ -2,6 +2,7 @@
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <LittleFS.h>
+#include <time.h>
 
 /*
  * ===== Pin assignments (D1 Mini) =====
@@ -22,14 +23,31 @@
 const char* AP_SSID = "CatToy-Setup";
 const char* AP_PASS = "cattoy123";
 
-ESP8266WebServer server(80);
+const char* CONFIG_PATH = "/config.json";
 
 const int SERVO_PIN  = D5;
 const int LED_PIN    = D4;
 const int MODE_A_PIN = D6;
 const int MODE_B_PIN = D7;
 
-const char* CONFIG_PATH = "/config.json";
+const size_t WIFI_SSID_MAX_LEN = 32;
+const size_t WIFI_PASS_MAX_LEN = 63;
+const size_t TIMEZONE_MAX_LEN = 63;
+
+const unsigned long STARTUP_WARMUP_MS = 5000UL;
+const unsigned long BOOT_GESTURE_WINDOW_MS = 4000UL;
+const unsigned long MODE_SWITCH_RESTART_DELAY_MS = 1500UL;
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000UL;
+const unsigned long WIFI_RETRY_INTERVAL_MS = 30000UL;
+const unsigned long NTP_SYNC_TIMEOUT_MS = 20000UL;
+const unsigned long TIME_VALID_MIN_EPOCH = 1704067200UL;  // 2024-01-01 UTC
+const unsigned long BOOT_GESTURE_STABLE_MS = 250UL;
+
+const char* NTP_SERVER_1 = "pool.ntp.org";
+const char* NTP_SERVER_2 = "time.nist.gov";
+
+ESP8266WebServer server(80);
+Servo wandServo;
 
 // ===== Servo safeguards =====
 int SERVO_MIN_DEG  = 25;
@@ -40,7 +58,7 @@ const bool AUTO_CENTER_REST = true;
 const int LAZY_STEP_DEG    = 2;
 const int PLAYFUL_STEP_DEG = 3;
 const int ZOOMIES_STEP_DEG = 4;
-const int DART_EXTRA_STEP_DEG   = 2;
+const int DART_EXTRA_STEP_DEG = 2;
 
 // Smaller delay = faster motion
 int LAZY_STEP_DELAY_MS    = 10;
@@ -49,10 +67,12 @@ int ZOOMIES_STEP_DELAY_MS = 4;
 int AUTO_REST_MIN_MINUTES = 2;
 int AUTO_REST_MAX_MINUTES = 5;
 
-const unsigned long STARTUP_WARMUP_MS = 5000UL;
-const unsigned long MODE_SWITCH_RESTART_DELAY_MS = 1500UL;
-
-Servo wandServo;
+char WIFI_SSID[WIFI_SSID_MAX_LEN + 1] = "";
+char WIFI_PASS[WIFI_PASS_MAX_LEN + 1] = "";
+char TIMEZONE_TZ[TIMEZONE_MAX_LEN + 1] = "EST5EDT,M3.2.0/2,M11.1.0/2";
+bool SCHEDULE_ENABLED = false;
+int SCHEDULE_START_MINUTE = 9 * 60;
+int SCHEDULE_END_MINUTE = 17 * 60;
 
 enum PlayMode {
   MODE_LAZY,
@@ -64,6 +84,28 @@ enum ControllerState {
   STATE_STARTUP,
   STATE_RESTING,
   STATE_SESSION
+};
+
+enum ScheduleDecisionReason {
+  SCHEDULE_DECISION_DISABLED,
+  SCHEDULE_DECISION_TIME_INVALID,
+  SCHEDULE_DECISION_IN_WINDOW,
+  SCHEDULE_DECISION_OUTSIDE_WINDOW
+};
+
+struct TimezoneOption {
+  const char* label;
+  const char* tz;
+};
+
+const TimezoneOption TIMEZONE_OPTIONS[] = {
+  {"Eastern", "EST5EDT,M3.2.0/2,M11.1.0/2"},
+  {"Central", "CST6CDT,M3.2.0/2,M11.1.0/2"},
+  {"Mountain", "MST7MDT,M3.2.0/2,M11.1.0/2"},
+  {"Arizona", "MST7"},
+  {"Pacific", "PST8PDT,M3.2.0/2,M11.1.0/2"},
+  {"Alaska", "AKST9AKDT,M3.2.0/2,M11.1.0/2"},
+  {"Hawaii", "HST10"}
 };
 
 ControllerState controllerState = STATE_STARTUP;
@@ -80,11 +122,32 @@ bool forceSessionRequested = false;
 bool parkRequested = false;
 bool modeSwitchRestartPending = false;
 
+bool hasSavedWifiCredentials = false;
+bool wifiSetupModeForced = false;
+bool bootGestureWindowClosed = false;
+bool networkBootStarted = false;
+bool stationConnectAttemptActive = false;
+bool stationWasConnected = false;
+bool timeSyncRequested = false;
+bool timezoneApplied = false;
+bool timeValid = false;
+
 // ===== Runtime timing =====
 unsigned long startupEndMs = 0;
+unsigned long bootGestureWindowEndMs = 0;
 unsigned long nextAutoSessionMs = 0;
 unsigned long lastSessionEndMs = 0;
 unsigned long sessionCounter = 0;
+unsigned long wifiConnectAttemptStartMs = 0;
+unsigned long lastWifiConnectAttemptMs = 0;
+unsigned long ntpSyncStartMs = 0;
+
+PlayMode bootGestureStableMode = MODE_ZOOMIES;
+PlayMode lastBootGestureRawMode = MODE_ZOOMIES;
+unsigned long lastBootGestureRawChangeMs = 0;
+int bootGestureStage = 0;
+
+ScheduleDecisionReason lastScheduleDecisionReason = SCHEDULE_DECISION_DISABLED;
 
 // ===== Helpers =====
 int clampAngle(int angle) {
@@ -129,6 +192,65 @@ bool validateRestWindowMinutes(int minMinutes, int maxMinutes) {
   return true;
 }
 
+bool validateScheduleMinute(int minuteValue) {
+  return minuteValue >= 0 && minuteValue <= 1439;
+}
+
+bool validateTimezoneTz(const String& tz) {
+  if (tz.length() == 0 || tz.length() > TIMEZONE_MAX_LEN) return false;
+
+  for (size_t i = 0; i < sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]); i++) {
+    if (tz.equals(TIMEZONE_OPTIONS[i].tz)) return true;
+  }
+
+  return false;
+}
+
+void copyBoundedString(char* dest, size_t destSize, const String& value) {
+  size_t copyLen = value.length();
+  if (copyLen >= destSize) copyLen = destSize - 1;
+  memcpy(dest, value.c_str(), copyLen);
+  dest[copyLen] = '\0';
+}
+
+String jsonEscape(const char* value) {
+  String escaped;
+  escaped.reserve(strlen(value) + 8);
+
+  for (size_t i = 0; value[i] != '\0'; i++) {
+    char c = value[i];
+    if (c == '\\' || c == '\"') {
+      escaped += '\\';
+      escaped += c;
+    } else if (c == '\n') {
+      escaped += F("\\n");
+    } else if (c == '\r') {
+      escaped += F("\\r");
+    } else {
+      escaped += c;
+    }
+  }
+
+  return escaped;
+}
+
+String htmlEscape(const char* value) {
+  String escaped;
+  escaped.reserve(strlen(value) + 8);
+
+  for (size_t i = 0; value[i] != '\0'; i++) {
+    char c = value[i];
+    if (c == '&') escaped += F("&amp;");
+    else if (c == '<') escaped += F("&lt;");
+    else if (c == '>') escaped += F("&gt;");
+    else if (c == '\"') escaped += F("&quot;");
+    else if (c == '\'') escaped += F("&#39;");
+    else escaped += c;
+  }
+
+  return escaped;
+}
+
 bool extractJsonInt(const String& json, const char* key, int& valueOut) {
   String quotedKey = String("\"") + key + "\"";
   int keyPos = json.indexOf(quotedKey);
@@ -157,8 +279,71 @@ bool extractJsonInt(const String& json, const char* key, int& valueOut) {
   return true;
 }
 
+bool extractJsonBool(const String& json, const char* key, bool& valueOut) {
+  String quotedKey = String("\"") + key + "\"";
+  int keyPos = json.indexOf(quotedKey);
+  if (keyPos < 0) return false;
+
+  int colonPos = json.indexOf(':', keyPos + quotedKey.length());
+  if (colonPos < 0) return false;
+
+  int valueStart = colonPos + 1;
+  while (valueStart < json.length() && isspace(json[valueStart])) {
+    valueStart++;
+  }
+
+  if (json.startsWith("true", valueStart)) {
+    valueOut = true;
+    return true;
+  }
+
+  if (json.startsWith("false", valueStart)) {
+    valueOut = false;
+    return true;
+  }
+
+  return false;
+}
+
+bool extractJsonString(const String& json, const char* key, String& valueOut) {
+  String quotedKey = String("\"") + key + "\"";
+  int keyPos = json.indexOf(quotedKey);
+  if (keyPos < 0) return false;
+
+  int colonPos = json.indexOf(':', keyPos + quotedKey.length());
+  if (colonPos < 0) return false;
+
+  int valueStart = colonPos + 1;
+  while (valueStart < json.length() && isspace(json[valueStart])) {
+    valueStart++;
+  }
+
+  if (valueStart >= json.length() || json[valueStart] != '\"') return false;
+  valueStart++;
+
+  String result;
+  for (int i = valueStart; i < json.length(); i++) {
+    char c = json[i];
+    if (c == '\\') {
+      i++;
+      if (i >= json.length()) return false;
+      char escaped = json[i];
+      if (escaped == 'n') result += '\n';
+      else if (escaped == 'r') result += '\r';
+      else result += escaped;
+    } else if (c == '\"') {
+      valueOut = result;
+      return true;
+    } else {
+      result += c;
+    }
+  }
+
+  return false;
+}
+
 int maxSafeAmplitude() {
-  int leftRoom  = SERVO_REST_DEG - SERVO_MIN_DEG;
+  int leftRoom = SERVO_REST_DEG - SERVO_MIN_DEG;
   int rightRoom = SERVO_MAX_DEG - SERVO_REST_DEG;
   int safeRoom = min2(leftRoom, rightRoom);
   return max2(0, safeRoom);
@@ -172,16 +357,16 @@ PlayMode readModeSwitch() {
   int a = digitalRead(MODE_A_PIN);
   int b = digitalRead(MODE_B_PIN);
 
-  if (a == LOW && b == LOW)   return MODE_LAZY;
+  if (a == LOW && b == LOW) return MODE_LAZY;
   if (a == HIGH && b == HIGH) return MODE_PLAYFUL;
   return MODE_ZOOMIES;
 }
 
 const char* modeName(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY:     return "Lazy";
-    case MODE_PLAYFUL:  return "Playful";
-    case MODE_ZOOMIES:  return "Zoomies";
+    case MODE_LAZY: return "Lazy";
+    case MODE_PLAYFUL: return "Playful";
+    case MODE_ZOOMIES: return "Zoomies";
   }
   return "Unknown";
 }
@@ -195,38 +380,48 @@ const char* controllerStateName(ControllerState state) {
   return "Unknown";
 }
 
+const char* scheduleDecisionReasonName(ScheduleDecisionReason reason) {
+  switch (reason) {
+    case SCHEDULE_DECISION_DISABLED: return "Schedule disabled";
+    case SCHEDULE_DECISION_TIME_INVALID: return "Time invalid, auto-start suspended";
+    case SCHEDULE_DECISION_IN_WINDOW: return "Inside allowed schedule window";
+    case SCHEDULE_DECISION_OUTSIDE_WINDOW: return "Outside allowed schedule window";
+  }
+  return "Unknown";
+}
+
 int ledToggleIntervalMs(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY:     return 420;
-    case MODE_PLAYFUL:  return 240;
-    case MODE_ZOOMIES:  return 140;
+    case MODE_LAZY: return 420;
+    case MODE_PLAYFUL: return 240;
+    case MODE_ZOOMIES: return 140;
   }
   return 240;
 }
 
 int stepDelayMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY:     return LAZY_STEP_DELAY_MS;
-    case MODE_PLAYFUL:  return PLAYFUL_STEP_DELAY_MS;
-    case MODE_ZOOMIES:  return ZOOMIES_STEP_DELAY_MS;
+    case MODE_LAZY: return LAZY_STEP_DELAY_MS;
+    case MODE_PLAYFUL: return PLAYFUL_STEP_DELAY_MS;
+    case MODE_ZOOMIES: return ZOOMIES_STEP_DELAY_MS;
   }
   return PLAYFUL_STEP_DELAY_MS;
 }
 
 int stepDegForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY:     return LAZY_STEP_DEG;
-    case MODE_PLAYFUL:  return PLAYFUL_STEP_DEG;
-    case MODE_ZOOMIES:  return ZOOMIES_STEP_DEG;
+    case MODE_LAZY: return LAZY_STEP_DEG;
+    case MODE_PLAYFUL: return PLAYFUL_STEP_DEG;
+    case MODE_ZOOMIES: return ZOOMIES_STEP_DEG;
   }
   return PLAYFUL_STEP_DEG;
 }
 
 unsigned long sessionDurationMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY:     return randRangeUL(20000UL, 35000UL);
-    case MODE_PLAYFUL:  return randRangeUL(30000UL, 50000UL);
-    case MODE_ZOOMIES:  return randRangeUL(40000UL, 65000UL);
+    case MODE_LAZY: return randRangeUL(20000UL, 35000UL);
+    case MODE_PLAYFUL: return randRangeUL(30000UL, 50000UL);
+    case MODE_ZOOMIES: return randRangeUL(40000UL, 65000UL);
   }
   return 30000UL;
 }
@@ -250,9 +445,9 @@ int teaseAmpForMode(PlayMode mode) {
   int hiPct = 0;
 
   switch (mode) {
-    case MODE_LAZY:     loPct = 5;  hiPct = 16; break;
-    case MODE_PLAYFUL:  loPct = 10; hiPct = 28; break;
-    case MODE_ZOOMIES:  loPct = 15; hiPct = 34; break;
+    case MODE_LAZY: loPct = 5; hiPct = 16; break;
+    case MODE_PLAYFUL: loPct = 10; hiPct = 28; break;
+    case MODE_ZOOMIES: loPct = 15; hiPct = 34; break;
   }
 
   int lo = max2(4, pctOf(maxAmp, loPct));
@@ -266,9 +461,9 @@ int dartAmpForMode(PlayMode mode) {
   int hiPct = 0;
 
   switch (mode) {
-    case MODE_LAZY:     loPct = 18; hiPct = 42; break;
-    case MODE_PLAYFUL:  loPct = 35; hiPct = 70; break;
-    case MODE_ZOOMIES:  loPct = 55; hiPct = 92; break;
+    case MODE_LAZY: loPct = 18; hiPct = 42; break;
+    case MODE_PLAYFUL: loPct = 35; hiPct = 70; break;
+    case MODE_ZOOMIES: loPct = 55; hiPct = 92; break;
   }
 
   int lo = max2(10, pctOf(maxAmp, loPct));
@@ -276,8 +471,292 @@ int dartAmpForMode(PlayMode mode) {
   return randRange(lo, hi);
 }
 
+String wifiStatusText() {
+  if (!hasSavedWifiCredentials) return "AP only (no saved Wi-Fi)";
+  if (wifiSetupModeForced) return "AP only (boot gesture setup mode)";
+
+  wl_status_t status = WiFi.status();
+  if (status == WL_CONNECTED) {
+    return String("AP + STA connected to ") + WiFi.SSID() + " (" + WiFi.localIP().toString() + ")";
+  }
+
+  if (stationConnectAttemptActive) return "AP + STA connecting";
+  return "AP + STA waiting to reconnect";
+}
+
+String timeStatusText() {
+  if (!hasSavedWifiCredentials) return "Time unavailable (no saved Wi-Fi)";
+  if (wifiSetupModeForced) return "Time unavailable in setup mode";
+  if (timeValid) return "Local time valid";
+  if (WiFi.status() == WL_CONNECTED && timeSyncRequested) return "Waiting for NTP time";
+  if (WiFi.status() == WL_CONNECTED) return "Wi-Fi connected, time sync not started";
+  return "Waiting for Wi-Fi before time sync";
+}
+
+String formatMinuteOfDay(int minuteOfDay) {
+  if (!validateScheduleMinute(minuteOfDay)) return "--:--";
+
+  int hour = minuteOfDay / 60;
+  int minute = minuteOfDay % 60;
+
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%02d:%02d", hour, minute);
+  return String(buf);
+}
+
+bool parseTimeArg(const String& value, int& minuteOut) {
+  if (value.length() != 5 || value[2] != ':') return false;
+
+  int hour = value.substring(0, 2).toInt();
+  int minute = value.substring(3, 5).toInt();
+
+  if (hour < 0 || hour > 23) return false;
+  if (minute < 0 || minute > 59) return false;
+
+  minuteOut = hour * 60 + minute;
+  return true;
+}
+
+const char* timezoneLabelForTz(const char* tz) {
+  for (size_t i = 0; i < sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]); i++) {
+    if (strcmp(tz, TIMEZONE_OPTIONS[i].tz) == 0) return TIMEZONE_OPTIONS[i].label;
+  }
+
+  return "Custom";
+}
+
+bool configHasSavedWifiCredentials() {
+  return WIFI_SSID[0] != '\0';
+}
+
+void applyWifiCredentials(const String& ssid, const String& password) {
+  copyBoundedString(WIFI_SSID, sizeof(WIFI_SSID), ssid);
+  copyBoundedString(WIFI_PASS, sizeof(WIFI_PASS), password);
+  hasSavedWifiCredentials = configHasSavedWifiCredentials();
+}
+
+void applyTimezoneSetting(const String& tz) {
+  copyBoundedString(TIMEZONE_TZ, sizeof(TIMEZONE_TZ), tz);
+  timezoneApplied = false;
+}
+
+void applyScheduleConfig(bool enabled, int startMinute, int endMinute) {
+  SCHEDULE_ENABLED = enabled;
+  SCHEDULE_START_MINUTE = startMinute;
+  SCHEDULE_END_MINUTE = endMinute;
+}
+
 void setLed(bool on) {
   digitalWrite(LED_PIN, on ? HIGH : LOW);
+}
+
+void logScheduleDecisionIfChanged(ScheduleDecisionReason reason) {
+  if (reason == lastScheduleDecisionReason) return;
+
+  lastScheduleDecisionReason = reason;
+  Serial.print("Schedule gate: ");
+  Serial.println(scheduleDecisionReasonName(reason));
+}
+
+bool isTimeValid() {
+  time_t now = time(nullptr);
+  return now >= (time_t)TIME_VALID_MIN_EPOCH;
+}
+
+int currentLocalMinuteOfDay() {
+  time_t now = time(nullptr);
+  struct tm localTime;
+  if (localtime_r(&now, &localTime) == nullptr) return -1;
+
+  return (localTime.tm_hour * 60) + localTime.tm_min;
+}
+
+bool isMinuteWithinScheduleWindow(int currentMinute, int startMinute, int endMinute) {
+  if (startMinute == endMinute) return true;
+
+  if (startMinute < endMinute) {
+    return currentMinute >= startMinute && currentMinute < endMinute;
+  }
+
+  return currentMinute >= startMinute || currentMinute < endMinute;
+}
+
+void applyTimezoneIfNeeded() {
+  if (timezoneApplied || TIMEZONE_TZ[0] == '\0') return;
+
+  setenv("TZ", TIMEZONE_TZ, 1);
+  tzset();
+  timezoneApplied = true;
+
+  Serial.print("Timezone applied: ");
+  Serial.print(timezoneLabelForTz(TIMEZONE_TZ));
+  Serial.print(" (");
+  Serial.print(TIMEZONE_TZ);
+  Serial.println(")");
+}
+
+void resetTimeState(const char* reason) {
+  bool hadValidTime = timeValid;
+  timeValid = false;
+  timeSyncRequested = false;
+  ntpSyncStartMs = 0;
+
+  if (reason != nullptr) {
+    Serial.print("Time state reset: ");
+    Serial.println(reason);
+  }
+
+  if (hadValidTime) {
+    logScheduleDecisionIfChanged(SCHEDULE_DECISION_TIME_INVALID);
+  }
+}
+
+void beginTimeSync() {
+  if (timeSyncRequested || WiFi.status() != WL_CONNECTED) return;
+
+  applyTimezoneIfNeeded();
+  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
+  timeSyncRequested = true;
+  ntpSyncStartMs = millis();
+  timeValid = false;
+
+  Serial.println("NTP sync started.");
+}
+
+void startStationConnectionAttempt() {
+  if (!hasSavedWifiCredentials || wifiSetupModeForced) return;
+
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  stationConnectAttemptActive = true;
+  networkBootStarted = true;
+  wifiConnectAttemptStartMs = millis();
+  lastWifiConnectAttemptMs = wifiConnectAttemptStartMs;
+
+  Serial.print("Station connect started for SSID: ");
+  Serial.println(WIFI_SSID);
+}
+
+void startNetworkBootIfConfigured() {
+  if (networkBootStarted || bootGestureWindowClosed == false) return;
+  if (!hasSavedWifiCredentials) {
+    networkBootStarted = true;
+    Serial.println("No saved Wi-Fi credentials. Staying in AP-only mode.");
+    return;
+  }
+
+  if (wifiSetupModeForced) {
+    networkBootStarted = true;
+    Serial.println("Boot gesture requested setup mode. Staying in AP-only mode.");
+    return;
+  }
+
+  startStationConnectionAttempt();
+}
+
+void serviceStationConnection() {
+  wl_status_t status = WiFi.status();
+
+  if (status == WL_CONNECTED) {
+    if (!stationWasConnected) {
+      stationWasConnected = true;
+      stationConnectAttemptActive = false;
+      Serial.print("Station connected. IP: ");
+      Serial.println(WiFi.localIP());
+      beginTimeSync();
+    }
+    return;
+  }
+
+  if (stationWasConnected) {
+    stationWasConnected = false;
+    Serial.println("Station disconnected.");
+    resetTimeState("Wi-Fi disconnected");
+  }
+
+  if (!hasSavedWifiCredentials || wifiSetupModeForced || !networkBootStarted) return;
+
+  if (stationConnectAttemptActive && millis() - wifiConnectAttemptStartMs >= WIFI_CONNECT_TIMEOUT_MS) {
+    stationConnectAttemptActive = false;
+    Serial.println("Station connect timed out. Will retry while keeping AP available.");
+  }
+
+  if (!stationConnectAttemptActive && millis() - lastWifiConnectAttemptMs >= WIFI_RETRY_INTERVAL_MS) {
+    startStationConnectionAttempt();
+  }
+}
+
+void serviceTimeState() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  if (!timeSyncRequested) {
+    beginTimeSync();
+    return;
+  }
+
+  bool nowValid = isTimeValid();
+  if (nowValid && !timeValid) {
+    timeValid = true;
+
+    time_t now = time(nullptr);
+    struct tm localTime;
+    localtime_r(&now, &localTime);
+
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &localTime);
+
+    Serial.print("Local time is valid: ");
+    Serial.println(buf);
+    return;
+  }
+
+  if (!nowValid && timeSyncRequested && ntpSyncStartMs != 0 &&
+      millis() - ntpSyncStartMs >= NTP_SYNC_TIMEOUT_MS) {
+    Serial.println("NTP time still invalid after timeout; scheduled auto-start remains suspended.");
+    ntpSyncStartMs = millis();
+  }
+}
+
+void serviceBootGesture(unsigned long now) {
+  if (bootGestureWindowClosed) return;
+
+  PlayMode rawMode = readModeSwitch();
+  if (rawMode != lastBootGestureRawMode) {
+    lastBootGestureRawMode = rawMode;
+    lastBootGestureRawChangeMs = now;
+  }
+
+  if (rawMode != bootGestureStableMode &&
+      now - lastBootGestureRawChangeMs >= BOOT_GESTURE_STABLE_MS) {
+    bootGestureStableMode = rawMode;
+    Serial.print("Boot gesture stable mode: ");
+    Serial.println(modeName(bootGestureStableMode));
+
+    if (bootGestureStage == 0 && bootGestureStableMode == MODE_LAZY) {
+      bootGestureStage = 1;
+    } else if (bootGestureStage == 1 && bootGestureStableMode == MODE_PLAYFUL) {
+      bootGestureStage = 2;
+    } else if (bootGestureStage == 2 && bootGestureStableMode == MODE_LAZY) {
+      bootGestureStage = 3;
+      wifiSetupModeForced = true;
+      networkBootStarted = true;
+      Serial.println("Boot gesture detected: entering Wi-Fi setup mode for this boot.");
+    }
+  }
+
+  if (now >= bootGestureWindowEndMs) {
+    bootGestureWindowClosed = true;
+    Serial.println("Boot gesture window closed.");
+  }
+}
+
+void serviceRuntimeState() {
+  unsigned long now = millis();
+
+  serviceBootGesture(now);
+  startNetworkBootIfConfigured();
+  serviceStationConnection();
+  serviceTimeState();
 }
 
 void updateLed(PlayMode mode, unsigned long now) {
@@ -292,6 +771,7 @@ void updateLed(PlayMode mode, unsigned long now) {
 
 void serviceNetwork() {
   server.handleClient();
+  serviceRuntimeState();
   yield();
 }
 
@@ -332,7 +812,7 @@ bool delayResponsive(unsigned long ms, PlayMode modeAtStart) {
 
 bool moveServoSmooth(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayMode modeAtStart) {
   fromDeg = clampAngle(fromDeg);
-  toDeg   = clampAngle(toDeg);
+  toDeg = clampAngle(toDeg);
 
   if (fromDeg == toDeg) {
     writeServoAngle(toDeg);
@@ -366,7 +846,7 @@ bool moveServoSmooth(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayM
 
 void moveServoSmoothPark(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayMode ledMode) {
   fromDeg = clampAngle(fromDeg);
-  toDeg   = clampAngle(toDeg);
+  toDeg = clampAngle(toDeg);
 
   if (fromDeg == toDeg) {
     writeServoAngle(toDeg);
@@ -452,6 +932,18 @@ bool saveConfig() {
   json += String(AUTO_REST_MIN_MINUTES);
   json += ",\"autoRestMaxMinutes\":";
   json += String(AUTO_REST_MAX_MINUTES);
+  json += ",\"wifiSsid\":\"";
+  json += jsonEscape(WIFI_SSID);
+  json += "\",\"wifiPass\":\"";
+  json += jsonEscape(WIFI_PASS);
+  json += "\",\"timezoneTz\":\"";
+  json += jsonEscape(TIMEZONE_TZ);
+  json += "\",\"scheduleEnabled\":";
+  json += SCHEDULE_ENABLED ? "true" : "false";
+  json += ",\"scheduleStartMinute\":";
+  json += String(SCHEDULE_START_MINUTE);
+  json += ",\"scheduleEndMinute\":";
+  json += String(SCHEDULE_END_MINUTE);
   json += "}\n";
 
   size_t written = file.print(json);
@@ -489,6 +981,12 @@ void loadConfig() {
   int savedZoomiesDelay = ZOOMIES_STEP_DELAY_MS;
   int savedRestMinMinutes = AUTO_REST_MIN_MINUTES;
   int savedRestMaxMinutes = AUTO_REST_MAX_MINUTES;
+  int savedScheduleStartMinute = SCHEDULE_START_MINUTE;
+  int savedScheduleEndMinute = SCHEDULE_END_MINUTE;
+  bool savedScheduleEnabled = SCHEDULE_ENABLED;
+  String savedWifiSsid = WIFI_SSID;
+  String savedWifiPass = WIFI_PASS;
+  String savedTimezoneTz = TIMEZONE_TZ;
 
   if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
       !extractJsonInt(json, "servoMaxDeg", savedMax)) {
@@ -529,6 +1027,48 @@ void loadConfig() {
     Serial.println("Saved rest window is invalid. Using default rest window.");
   }
 
+  if (extractJsonString(json, "wifiSsid", savedWifiSsid)) {
+    if (savedWifiSsid.length() > WIFI_SSID_MAX_LEN) {
+      Serial.println("Saved Wi-Fi SSID too long. Ignoring saved SSID.");
+      savedWifiSsid = "";
+    }
+  }
+
+  if (extractJsonString(json, "wifiPass", savedWifiPass)) {
+    if (savedWifiPass.length() > WIFI_PASS_MAX_LEN) {
+      Serial.println("Saved Wi-Fi password too long. Ignoring saved password.");
+      savedWifiPass = "";
+    }
+  }
+
+  if (extractJsonString(json, "timezoneTz", savedTimezoneTz)) {
+    if (!validateTimezoneTz(savedTimezoneTz)) {
+      Serial.println("Saved timezone invalid. Using default timezone.");
+      savedTimezoneTz = TIMEZONE_TZ;
+    }
+  }
+
+  bool hasScheduleEnabled = extractJsonBool(json, "scheduleEnabled", savedScheduleEnabled);
+  bool hasScheduleStart = extractJsonInt(json, "scheduleStartMinute", savedScheduleStartMinute);
+  bool hasScheduleEnd = extractJsonInt(json, "scheduleEndMinute", savedScheduleEndMinute);
+
+  if (hasScheduleStart && !validateScheduleMinute(savedScheduleStartMinute)) {
+    Serial.println("Saved schedule start minute invalid. Using default schedule start.");
+    savedScheduleStartMinute = SCHEDULE_START_MINUTE;
+  }
+
+  if (hasScheduleEnd && !validateScheduleMinute(savedScheduleEndMinute)) {
+    Serial.println("Saved schedule end minute invalid. Using default schedule end.");
+    savedScheduleEndMinute = SCHEDULE_END_MINUTE;
+  }
+
+  applyWifiCredentials(savedWifiSsid, savedWifiPass);
+  applyTimezoneSetting(savedTimezoneTz);
+
+  if (hasScheduleEnabled || hasScheduleStart || hasScheduleEnd) {
+    applyScheduleConfig(savedScheduleEnabled, savedScheduleStartMinute, savedScheduleEndMinute);
+  }
+
   Serial.print("Loaded servo window from LittleFS: ");
   Serial.print(SERVO_MIN_DEG);
   Serial.print(" to ");
@@ -543,17 +1083,46 @@ void loadConfig() {
   Serial.print(AUTO_REST_MIN_MINUTES);
   Serial.print(" to ");
   Serial.println(AUTO_REST_MAX_MINUTES);
+  Serial.print("Loaded Wi-Fi SSID: ");
+  Serial.println(hasSavedWifiCredentials ? WIFI_SSID : "(none)");
+  Serial.print("Loaded timezone: ");
+  Serial.println(TIMEZONE_TZ);
+  Serial.print("Loaded schedule: ");
+  Serial.print(SCHEDULE_ENABLED ? "enabled " : "disabled ");
+  Serial.print(formatMinuteOfDay(SCHEDULE_START_MINUTE));
+  Serial.print(" to ");
+  Serial.println(formatMinuteOfDay(SCHEDULE_END_MINUTE));
 }
 
 bool canAutoStartSessions() {
-  // Future scheduling should gate autonomous starts here without changing
-  // session behavior or low-level motion code.
-  return true;
+  if (!SCHEDULE_ENABLED) {
+    logScheduleDecisionIfChanged(SCHEDULE_DECISION_DISABLED);
+    return true;
+  }
+
+  if (!timeValid || !isTimeValid()) {
+    logScheduleDecisionIfChanged(SCHEDULE_DECISION_TIME_INVALID);
+    return false;
+  }
+
+  int currentMinute = currentLocalMinuteOfDay();
+  if (currentMinute < 0) {
+    logScheduleDecisionIfChanged(SCHEDULE_DECISION_TIME_INVALID);
+    return false;
+  }
+
+  if (isMinuteWithinScheduleWindow(currentMinute, SCHEDULE_START_MINUTE, SCHEDULE_END_MINUTE)) {
+    logScheduleDecisionIfChanged(SCHEDULE_DECISION_IN_WINDOW);
+    return true;
+  }
+
+  logScheduleDecisionIfChanged(SCHEDULE_DECISION_OUTSIDE_WINDOW);
+  return false;
 }
 
 bool doTease(PlayMode modeAtStart) {
   int amp = teaseAmpForMode(modeAtStart);
-  int left  = clampAngle(SERVO_REST_DEG - amp);
+  int left = clampAngle(SERVO_REST_DEG - amp);
   int right = clampAngle(SERVO_REST_DEG + amp);
   int speed = teaseSpeedForMode(modeAtStart);
 
@@ -576,14 +1145,14 @@ bool doTease(PlayMode modeAtStart) {
 
 bool doBigDart(PlayMode modeAtStart) {
   int amp = dartAmpForMode(modeAtStart);
-  int left  = clampAngle(SERVO_REST_DEG - amp);
+  int left = clampAngle(SERVO_REST_DEG - amp);
   int right = clampAngle(SERVO_REST_DEG + amp);
   int speed = dartSpeedForMode(modeAtStart);
   int dartStepDeg = stepDegForMode(modeAtStart) + DART_EXTRA_STEP_DEG;
 
   bool startLeft = (random(2) == 0);
   int start = startLeft ? left : right;
-  int end   = startLeft ? right : left;
+  int end = startLeft ? right : left;
 
   if (moveToAngle(start, speed, dartStepDeg, modeAtStart)) return true;
   if (delayResponsive((unsigned long)randRange(20, 75), modeAtStart)) return true;
@@ -600,18 +1169,18 @@ bool doBigDart(PlayMode modeAtStart) {
 
 bool hidePause(PlayMode modeAtStart) {
   switch (modeAtStart) {
-    case MODE_LAZY:     return delayResponsive((unsigned long)randRange(2500, 4500), modeAtStart);
-    case MODE_PLAYFUL:  return delayResponsive((unsigned long)randRange(2200, 4000), modeAtStart);
-    case MODE_ZOOMIES:  return delayResponsive((unsigned long)randRange(1800, 3200), modeAtStart);
+    case MODE_LAZY: return delayResponsive((unsigned long)randRange(2500, 4500), modeAtStart);
+    case MODE_PLAYFUL: return delayResponsive((unsigned long)randRange(2200, 4000), modeAtStart);
+    case MODE_ZOOMIES: return delayResponsive((unsigned long)randRange(1800, 3200), modeAtStart);
   }
   return false;
 }
 
 bool shortPause(PlayMode modeAtStart) {
   switch (modeAtStart) {
-    case MODE_LAZY:     return delayResponsive((unsigned long)randRange(900, 2200), modeAtStart);
-    case MODE_PLAYFUL:  return delayResponsive((unsigned long)randRange(600, 1800), modeAtStart);
-    case MODE_ZOOMIES:  return delayResponsive((unsigned long)randRange(350, 1200), modeAtStart);
+    case MODE_LAZY: return delayResponsive((unsigned long)randRange(900, 2200), modeAtStart);
+    case MODE_PLAYFUL: return delayResponsive((unsigned long)randRange(600, 1800), modeAtStart);
+    case MODE_ZOOMIES: return delayResponsive((unsigned long)randRange(350, 1200), modeAtStart);
   }
   return false;
 }
@@ -629,7 +1198,7 @@ bool runChaosBurst(PlayMode modeAtStart, unsigned long chaosMs) {
 
 bool runTimedSession(PlayMode modeAtStart, unsigned long sessionMs, bool allowMidChaos) {
   unsigned long startMs = millis();
-  unsigned long endMs   = startMs + sessionMs;
+  unsigned long endMs = startMs + sessionMs;
 
   unsigned long warmupMs = min((unsigned long)15000, sessionMs / 4);
   unsigned long finaleMs = min((unsigned long)12000, sessionMs / 4);
@@ -742,31 +1311,41 @@ void runSessionForMode(PlayMode modeAtStart) {
   finishSession(modeAtStart);
 }
 
+String htmlSelectedAttr(bool selected) {
+  return selected ? F(" selected") : String("");
+}
+
+String htmlCheckedAttr(bool checked) {
+  return checked ? F(" checked") : String("");
+}
+
 String htmlPage() {
   PlayMode mode = readModeSwitch();
   unsigned long now = millis();
 
   String page;
-  page.reserve(4200);
+  page.reserve(9000);
 
   page += F(
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Cat Toy Control</title>"
     "<style>"
-    "body{font-family:Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;line-height:1.45;}"
+    "body{font-family:Arial,sans-serif;max-width:780px;margin:24px auto;padding:0 16px;line-height:1.45;}"
     ".card{border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:16px;}"
     ".hint{background:#f7f7f7;border-left:4px solid #4f6d4a;}"
     ".meta{color:#444;font-size:14px;}"
     ".actions form{display:inline-block;margin:8px 8px 0 0;}"
     "label{display:block;margin-top:12px;font-weight:600;}"
-    "input[type=number]{width:100%;padding:10px;font-size:16px;box-sizing:border-box;}"
+    "input[type=number],input[type=time],input[type=text],input[type=password],select{width:100%;padding:10px;font-size:16px;box-sizing:border-box;}"
     "button{margin-top:16px;padding:12px 16px;font-size:16px;border-radius:10px;border:0;cursor:pointer;}"
     ".secondary{background:#ececec;color:#111;}"
+    ".danger{background:#b64332;color:#fff;}"
+    ".status{display:grid;grid-template-columns:1fr;gap:6px;}"
     "</style></head><body>"
     "<h1>Cat Toy Control</h1>"
   );
 
-  page += F("<div class='card'>");
+  page += F("<div class='card status'>");
   page += F("<div><strong>Current mode:</strong> ");
   page += modeName(mode);
   page += F("</div><div><strong>Runtime state:</strong> ");
@@ -783,16 +1362,36 @@ String htmlPage() {
   page += String(AUTO_REST_MIN_MINUTES);
   page += F(" to ");
   page += String(AUTO_REST_MAX_MINUTES);
-  page += F(" min</div>");
+  page += F(" min</div><div><strong>Wi-Fi state:</strong> ");
+  page += wifiStatusText();
+  page += F("</div><div><strong>Time state:</strong> ");
+  page += timeStatusText();
+  page += F("</div><div><strong>Timezone:</strong> ");
+  page += timezoneLabelForTz(TIMEZONE_TZ);
+  page += F("</div><div><strong>Schedule:</strong> ");
+  page += scheduleDecisionReasonName(lastScheduleDecisionReason);
+  page += F("</div><div><strong>Schedule window:</strong> ");
+  page += formatMinuteOfDay(SCHEDULE_START_MINUTE);
+  page += F(" to ");
+  page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
+  if (SCHEDULE_START_MINUTE == SCHEDULE_END_MINUTE) {
+    page += F(" (all day)");
+  } else if (SCHEDULE_START_MINUTE > SCHEDULE_END_MINUTE) {
+    page += F(" (overnight)");
+  }
+  page += F("</div>");
 
   if (controllerState == STATE_STARTUP) {
     unsigned long warmupRemainingMs = (startupEndMs > now) ? (startupEndMs - now) : 0;
+    unsigned long gestureRemainingMs = (bootGestureWindowEndMs > now) ? (bootGestureWindowEndMs - now) : 0;
     page += F("<div><strong>Warmup remaining:</strong> ");
     page += String(warmupRemainingMs / 1000UL);
-    page += F(" s</div>");
+    page += F(" s</div><div><strong>Boot gesture window:</strong> ");
+    page += String(gestureRemainingMs / 1000UL);
+    page += F(" s remaining</div>");
   } else {
     unsigned long nextInMs = (nextAutoSessionMs > now) ? (nextAutoSessionMs - now) : 0;
-    page += F("<div><strong>Next auto session:</strong> ");
+    page += F("<div><strong>Next auto session timer:</strong> ");
     page += String(nextInMs / 1000UL);
     page += F(" s</div>");
   }
@@ -800,25 +1399,13 @@ String htmlPage() {
   page += F("</div>");
 
   page += F("<div class='card hint'><strong>Runtime model</strong>"
-            "<p class='meta'>This sketch now runs autonomous play sessions with rest periods between them. The local web UI changes settings and can trigger or park sessions, but basic play still works without visiting this page.</p>"
-            "<p class='meta'>That session boundary is the future hook for planned or scheduled play windows.</p></div>");
+            "<p class='meta'>Manual Start Session Now still works any time. The saved schedule only gates autonomous starts when local time is valid.</p>"
+            "<p class='meta'>If saved Wi-Fi is available, the toy keeps the local AP UI up while it also attempts station Wi-Fi and NTP time in the background.</p></div>");
 
   page += F("<div class='card actions'><strong>Manual control</strong>"
             "<form action='/start' method='post'><button type='submit'>Start Session Now</button></form>"
             "<form action='/park' method='post'><button class='secondary' type='submit'>Park At Rest</button></form>"
-            "<p class='meta'>Start now forces the next session immediately. Park ends the current session as soon as the sketch reaches an interrupt check and returns the servo to rest.</p></div>");
-
-  page += F("<div class='card hint'><strong>How to widen swings</strong>"
-            "<p class='meta'>The toy swings inside the servo window set below. Lowering the minimum angle and/or raising the maximum angle gives the servo more room to travel. A wider gap usually means stronger-looking swings, as long as your hardware can move safely in that range.</p>"
-            "<p class='meta'>Lazy stays gentler. Playful and Zoomies use more of the safe window and shorter rests.</p></div>");
-
-  page += F("<div class='card hint'><strong>How to change swing speed</strong>"
-            "<p class='meta'>These speed settings control how many milliseconds the sketch waits between small servo steps. Lower numbers move faster. Higher numbers move slower and softer.</p>"
-            "<p class='meta'>Change these gradually. If you set them too low, motion can get jerky or mechanically harsh.</p></div>");
-
-  page += F("<div class='card hint'><strong>How to slow down automatic play</strong>"
-            "<p class='meta'>The rest window below controls how long the toy waits between sessions when left running on its own. The sketch picks a random rest time between the minimum and maximum you set.</p>"
-            "<p class='meta'>Use a longer window if you want the toy available all day without constant stimulation.</p></div>");
+            "<p class='meta'>Start now forces the next session immediately, even outside the saved schedule. Park ends the current session as soon as the sketch reaches an interrupt check and returns the servo to rest.</p></div>");
 
   page += F("<div class='card'><form action='/set' method='get'>");
   page += F("<label for='min'>Left limit / minimum angle (SERVO_MIN_DEG)</label>");
@@ -856,17 +1443,59 @@ String htmlPage() {
   page += String(AUTO_REST_MAX_MINUTES);
   page += F("'>");
 
-  page += F("<button type='submit'>Apply</button>");
+  page += F("<button type='submit'>Apply Motion Settings</button>");
   page += F("</form>");
-  page += F("<p class='meta'>For safety this sketch requires max &gt; min and at least 20 degrees of spread. "
-            "When you apply a new window, the rest position is re-centered automatically and the setting is saved to LittleFS for the next boot.</p>");
-  page += F("<p class='meta'>Speed delay range is 2-25 ms. Lower is faster.</p>");
-  page += F("<p class='meta'>Rest window range is 1-240 minutes. Normal automatic sessions restart after a random pause inside that window. Mode-switch restarts stay fast.</p>");
+  page += F("<p class='meta'>Servo limits must keep max &gt; min with at least 20 degrees of spread. Rest remains auto-centered in the safe window.</p>");
+  page += F("</div>");
+
+  page += F("<div class='card'><form action='/network' method='post'>");
+  page += F("<strong>Wi-Fi and schedule</strong>");
+  page += F("<label for='wifiSsid'>Home Wi-Fi SSID</label>");
+  page += F("<input id='wifiSsid' name='wifiSsid' type='text' maxlength='32' value='");
+  page += htmlEscape(WIFI_SSID);
+  page += F("'>");
+
+  page += F("<label for='wifiPass'>Home Wi-Fi password</label>");
+  page += F("<input id='wifiPass' name='wifiPass' type='password' maxlength='63' value='");
+  page += htmlEscape(WIFI_PASS);
+  page += F("'>");
+
+  page += F("<label for='timezoneTz'>Timezone</label><select id='timezoneTz' name='timezoneTz'>");
+  for (size_t i = 0; i < sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]); i++) {
+    page += F("<option value='");
+    page += TIMEZONE_OPTIONS[i].tz;
+    page += F("'");
+    page += htmlSelectedAttr(strcmp(TIMEZONE_TZ, TIMEZONE_OPTIONS[i].tz) == 0);
+    page += F(">");
+    page += TIMEZONE_OPTIONS[i].label;
+    page += F("</option>");
+  }
+  page += F("</select>");
+
+  page += F("<label><input name='scheduleEnabled' type='checkbox' value='1'");
+  page += htmlCheckedAttr(SCHEDULE_ENABLED);
+  page += F("> Enable scheduled auto-start</label>");
+
+  page += F("<label for='scheduleStart'>Daily schedule start</label>");
+  page += F("<input id='scheduleStart' name='scheduleStart' type='time' value='");
+  page += formatMinuteOfDay(SCHEDULE_START_MINUTE);
+  page += F("'>");
+
+  page += F("<label for='scheduleEnd'>Daily schedule end</label>");
+  page += F("<input id='scheduleEnd' name='scheduleEnd' type='time' value='");
+  page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
+  page += F("'>");
+
+  page += F("<button type='submit'>Save Wi-Fi and Schedule</button>");
+  page += F("</form>");
+  page += F("<form action='/clear-wifi' method='post'><button class='danger' type='submit'>Clear Saved Wi-Fi</button></form>");
+  page += F("<p class='meta'>Use the boot gesture Lazy -> Playful -> Lazy during the first 4 seconds after boot to keep the toy in AP-only Wi-Fi setup mode for that boot.</p>");
+  page += F("<p class='meta'>If start and end times match, the schedule is treated as all day. Overnight windows are supported.</p>");
   page += F("</div>");
 
   page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
   page += AP_SSID;
-  page += F("</strong> and browse to <strong>http://192.168.4.1</strong>.</div>");
+  page += F("</strong> and browse to <strong>http://192.168.4.1</strong>. The local AP stays available even when station Wi-Fi is configured.</div>");
 
   page += F("</body></html>");
   return page;
@@ -949,10 +1578,120 @@ void handleSet() {
   server.send(303, "text/plain", "");
 }
 
+void handleNetworkSave() {
+  if (!server.hasArg("timezoneTz") || !server.hasArg("scheduleStart") || !server.hasArg("scheduleEnd")) {
+    server.send(400, "text/plain", "Missing one or more required Wi-Fi or schedule parameters.");
+    return;
+  }
+
+  String wifiSsid = server.arg("wifiSsid");
+  String wifiPass = server.arg("wifiPass");
+  String timezoneTz = server.arg("timezoneTz");
+  bool scheduleEnabled = server.hasArg("scheduleEnabled");
+  int scheduleStartMinute = 0;
+  int scheduleEndMinute = 0;
+
+  if (wifiSsid.length() > WIFI_SSID_MAX_LEN) {
+    server.send(400, "text/plain", "Wi-Fi SSID must be 32 characters or fewer.");
+    return;
+  }
+
+  if (wifiPass.length() > WIFI_PASS_MAX_LEN) {
+    server.send(400, "text/plain", "Wi-Fi password must be 63 characters or fewer.");
+    return;
+  }
+
+  if (wifiSsid.length() > 0 && wifiPass.length() > 0 && wifiPass.length() < 8) {
+    server.send(400, "text/plain", "Wi-Fi password must be at least 8 characters when Wi-Fi is saved.");
+    return;
+  }
+
+  if (wifiSsid.length() == 0) {
+    wifiPass = "";
+  }
+
+  if (!validateTimezoneTz(timezoneTz)) {
+    server.send(400, "text/plain", "Timezone selection is invalid.");
+    return;
+  }
+
+  if (!parseTimeArg(server.arg("scheduleStart"), scheduleStartMinute) ||
+      !parseTimeArg(server.arg("scheduleEnd"), scheduleEndMinute)) {
+    server.send(400, "text/plain", "Schedule times must be valid HH:MM values.");
+    return;
+  }
+
+  if (!validateScheduleMinute(scheduleStartMinute) || !validateScheduleMinute(scheduleEndMinute)) {
+    server.send(400, "text/plain", "Schedule times must stay within one day.");
+    return;
+  }
+
+  applyWifiCredentials(wifiSsid, wifiPass);
+  applyTimezoneSetting(timezoneTz);
+  applyScheduleConfig(scheduleEnabled, scheduleStartMinute, scheduleEndMinute);
+
+  if (!saveConfig()) {
+    server.send(500, "text/plain", "Updated Wi-Fi and schedule settings for this boot, but failed to save to LittleFS.");
+    return;
+  }
+
+  wifiSetupModeForced = false;
+  bootGestureWindowClosed = true;
+  networkBootStarted = false;
+  stationConnectAttemptActive = false;
+  stationWasConnected = false;
+
+  if (hasSavedWifiCredentials) {
+    WiFi.disconnect();
+    resetTimeState("Wi-Fi config updated");
+    Serial.println("Saved Wi-Fi and schedule settings updated. Starting AP+STA background connection.");
+  } else {
+    WiFi.disconnect();
+    WiFi.mode(WIFI_AP);
+    bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
+    resetTimeState("Wi-Fi credentials cleared by empty save");
+    networkBootStarted = true;
+    Serial.print("Wi-Fi credentials cleared by save. AP status: ");
+    Serial.println(apOk ? "READY" : "FAILED");
+  }
+
+  logScheduleDecisionIfChanged(SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED);
+
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
+}
+
+void handleClearWifi() {
+  applyWifiCredentials("", "");
+
+  if (!saveConfig()) {
+    server.send(500, "text/plain", "Cleared Wi-Fi for this boot, but failed to save to LittleFS.");
+    return;
+  }
+
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP);
+  bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
+
+  wifiSetupModeForced = false;
+  bootGestureWindowClosed = true;
+  networkBootStarted = true;
+  stationConnectAttemptActive = false;
+  stationWasConnected = false;
+  resetTimeState("Saved Wi-Fi cleared");
+
+  Serial.print("Saved Wi-Fi cleared. AP status: ");
+  Serial.println(apOk ? "READY" : "FAILED");
+
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
+}
+
 void handleStart() {
   forceSessionRequested = true;
   parkRequested = false;
   nextAutoSessionMs = millis();
+  Serial.println("Manual Start Session Now requested.");
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
 }
@@ -977,6 +1716,10 @@ void setup() {
   pinMode(MODE_B_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
 
+  lastBootGestureRawMode = readModeSwitch();
+  bootGestureStableMode = lastBootGestureRawMode;
+  lastBootGestureRawChangeMs = millis();
+
   littleFsReady = LittleFS.begin();
   if (!littleFsReady) {
     Serial.println("LittleFS mount failed. Continuing with defaults only.");
@@ -998,10 +1741,14 @@ void setup() {
   lastLedToggleMs = millis();
 
   startupEndMs = millis() + STARTUP_WARMUP_MS;
+  bootGestureWindowEndMs = millis() + BOOT_GESTURE_WINDOW_MS;
   controllerState = STATE_STARTUP;
   nextAutoSessionMs = startupEndMs;
   settingsChanged = false;
+  hasSavedWifiCredentials = configHasSavedWifiCredentials();
+  lastScheduleDecisionReason = SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED;
 
+  WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
   bool ok = WiFi.softAP(AP_SSID, AP_PASS);
 
@@ -1013,9 +1760,14 @@ void setup() {
   Serial.println(AP_SSID);
   Serial.print("Open: http://");
   Serial.println(WiFi.softAPIP());
+  Serial.print("Saved Wi-Fi credentials: ");
+  Serial.println(hasSavedWifiCredentials ? "present" : "not present");
+  Serial.println("Boot gesture window active for 4 seconds: Lazy -> Playful -> Lazy enters setup mode.");
 
   server.on("/", handleRoot);
   server.on("/set", HTTP_GET, handleSet);
+  server.on("/network", HTTP_POST, handleNetworkSave);
+  server.on("/clear-wifi", HTTP_POST, handleClearWifi);
   server.on("/start", HTTP_POST, handleStart);
   server.on("/park", HTTP_POST, handlePark);
   server.onNotFound(handleNotFound);
