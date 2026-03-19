@@ -40,11 +40,14 @@ const bool AUTO_CENTER_REST = true;
 const int BEGINNER_STEP_DEG     = 2;
 const int INTERMEDIATE_STEP_DEG = 3;
 const int ADVANCED_STEP_DEG     = 4;
+const int DART_EXTRA_STEP_DEG   = 2;
 
 // Smaller delay = faster motion
 int BEGINNER_STEP_DELAY_MS     = 10;
 int INTERMEDIATE_STEP_DELAY_MS = 6;
 int ADVANCED_STEP_DELAY_MS     = 4;
+
+const unsigned long STARTUP_WARMUP_MS = 5000UL;
 
 Servo wandServo;
 
@@ -54,6 +57,13 @@ enum PlayMode {
   MODE_ADVANCED
 };
 
+enum ControllerState {
+  STATE_STARTUP,
+  STATE_RESTING,
+  STATE_SESSION
+};
+
+ControllerState controllerState = STATE_STARTUP;
 int currentServoDeg = 90;
 
 // ===== LED blink state =====
@@ -63,6 +73,14 @@ unsigned long lastLedToggleMs = 0;
 // ===== Runtime flags =====
 bool settingsChanged = false;
 bool littleFsReady = false;
+bool forceSessionRequested = false;
+bool parkRequested = false;
+
+// ===== Runtime timing =====
+unsigned long startupEndMs = 0;
+unsigned long nextAutoSessionMs = 0;
+unsigned long lastSessionEndMs = 0;
+unsigned long sessionCounter = 0;
 
 // ===== Helpers =====
 int clampAngle(int angle) {
@@ -73,6 +91,20 @@ int clampAngle(int angle) {
 
 int min2(int a, int b) { return (a < b) ? a : b; }
 int max2(int a, int b) { return (a > b) ? a : b; }
+
+int pctOf(int base, int pct) {
+  return (base * pct) / 100;
+}
+
+int randRange(int minVal, int maxVal) {
+  return minVal + random(maxVal - minVal + 1);
+}
+
+unsigned long randRangeUL(unsigned long minVal, unsigned long maxVal) {
+  if (maxVal <= minVal) return minVal;
+  unsigned long span = maxVal - minVal;
+  return minVal + (unsigned long)random((long)span + 1L);
+}
 
 bool validateServoWindow(int newMin, int newMax) {
   if (newMin < 0 || newMin > 170) return false;
@@ -117,7 +149,8 @@ bool extractJsonInt(const String& json, const char* key, int& valueOut) {
 int maxSafeAmplitude() {
   int leftRoom  = SERVO_REST_DEG - SERVO_MIN_DEG;
   int rightRoom = SERVO_MAX_DEG - SERVO_REST_DEG;
-  return min2(leftRoom, rightRoom);
+  int safeRoom = min2(leftRoom, rightRoom);
+  return max2(0, safeRoom);
 }
 
 PlayMode readModeSwitch() {
@@ -138,12 +171,20 @@ const char* modeName(PlayMode mode) {
   return "Unknown";
 }
 
+const char* controllerStateName(ControllerState state) {
+  switch (state) {
+    case STATE_STARTUP: return "Startup warmup";
+    case STATE_RESTING: return "Resting";
+    case STATE_SESSION: return "In session";
+  }
+  return "Unknown";
+}
+
 int ledToggleIntervalMs(PlayMode mode) {
-  // Reasonable differences, not too frantic
   switch (mode) {
-    case MODE_BEGINNER:     return 420; // slowest
-    case MODE_INTERMEDIATE: return 240; // medium
-    case MODE_ADVANCED:     return 140; // fastest
+    case MODE_BEGINNER:     return 420;
+    case MODE_INTERMEDIATE: return 240;
+    case MODE_ADVANCED:     return 140;
   }
   return 240;
 }
@@ -166,8 +207,66 @@ int stepDegForMode(PlayMode mode) {
   return INTERMEDIATE_STEP_DEG;
 }
 
+unsigned long sessionDurationMsForMode(PlayMode mode) {
+  switch (mode) {
+    case MODE_BEGINNER:     return randRangeUL(20000UL, 35000UL);
+    case MODE_INTERMEDIATE: return randRangeUL(30000UL, 50000UL);
+    case MODE_ADVANCED:     return randRangeUL(40000UL, 65000UL);
+  }
+  return 30000UL;
+}
+
+unsigned long restDurationMsForMode(PlayMode mode) {
+  switch (mode) {
+    case MODE_BEGINNER:     return randRangeUL(4UL * 60UL * 1000UL, 7UL * 60UL * 1000UL);
+    case MODE_INTERMEDIATE: return randRangeUL(2UL * 60UL * 1000UL + 30000UL, 5UL * 60UL * 1000UL);
+    case MODE_ADVANCED:     return randRangeUL(90UL * 1000UL, 4UL * 60UL * 1000UL);
+  }
+  return 3UL * 60UL * 1000UL;
+}
+
+int teaseSpeedForMode(PlayMode mode) {
+  return stepDelayMsForMode(mode);
+}
+
+int dartSpeedForMode(PlayMode mode) {
+  int faster = stepDelayMsForMode(mode) - 1;
+  return max2(2, faster);
+}
+
+int teaseAmpForMode(PlayMode mode) {
+  int maxAmp = maxSafeAmplitude();
+  int loPct = 0;
+  int hiPct = 0;
+
+  switch (mode) {
+    case MODE_BEGINNER:     loPct = 5;  hiPct = 16; break;
+    case MODE_INTERMEDIATE: loPct = 10; hiPct = 28; break;
+    case MODE_ADVANCED:     loPct = 15; hiPct = 34; break;
+  }
+
+  int lo = max2(4, pctOf(maxAmp, loPct));
+  int hi = max2(lo + 2, pctOf(maxAmp, hiPct));
+  return randRange(lo, hi);
+}
+
+int dartAmpForMode(PlayMode mode) {
+  int maxAmp = maxSafeAmplitude();
+  int loPct = 0;
+  int hiPct = 0;
+
+  switch (mode) {
+    case MODE_BEGINNER:     loPct = 18; hiPct = 42; break;
+    case MODE_INTERMEDIATE: loPct = 35; hiPct = 70; break;
+    case MODE_ADVANCED:     loPct = 55; hiPct = 92; break;
+  }
+
+  int lo = max2(10, pctOf(maxAmp, loPct));
+  int hi = max2(lo + 2, pctOf(maxAmp, hiPct));
+  return randRange(lo, hi);
+}
+
 void setLed(bool on) {
-  // External LED from D4 -> resistor -> GND
   digitalWrite(LED_PIN, on ? HIGH : LOW);
 }
 
@@ -186,25 +285,78 @@ void serviceNetwork() {
   yield();
 }
 
-// Map Pi-style servo value [-1.0 .. +1.0] to safe degrees.
-// Use tenths to avoid float-heavy randomness:
-//   -10 = -1.0
-//    0  =  0.0
-//   10  = +1.0
-int servoValueTenthsToAngle(int value10) {
-  value10 = constrain(value10, -10, 10);
-
-  int amp = maxSafeAmplitude();
-  int target = SERVO_REST_DEG + (value10 * amp) / 10;
-  return clampAngle(target);
+void writeServoAngle(int angle) {
+  currentServoDeg = clampAngle(angle);
+  wandServo.write(currentServoDeg);
 }
 
-void moveServoSmooth(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayMode mode) {
+bool shouldInterruptSession(PlayMode modeAtStart) {
+  if (parkRequested) return true;
+
+  PlayMode currentMode = readModeSwitch();
+  if (currentMode != modeAtStart) return true;
+
+  if (settingsChanged) return true;
+
+  return false;
+}
+
+bool delayResponsive(unsigned long ms, PlayMode modeAtStart) {
+  unsigned long start = millis();
+
+  while (millis() - start < ms) {
+    PlayMode currentMode = readModeSwitch();
+    updateLed(currentMode, millis());
+    serviceNetwork();
+
+    if (shouldInterruptSession(modeAtStart)) return true;
+
+    delay(10);
+  }
+
+  return false;
+}
+
+bool moveServoSmooth(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayMode modeAtStart) {
   fromDeg = clampAngle(fromDeg);
   toDeg   = clampAngle(toDeg);
 
   if (fromDeg == toDeg) {
-    wandServo.write(toDeg);
+    writeServoAngle(toDeg);
+    return false;
+  }
+
+  stepDeg = max2(1, stepDeg);
+  int step = (toDeg > fromDeg) ? stepDeg : -stepDeg;
+
+  if (step > 0) {
+    for (int a = fromDeg; a < toDeg; a += step) {
+      writeServoAngle(a);
+      updateLed(modeAtStart, millis());
+      serviceNetwork();
+      if (shouldInterruptSession(modeAtStart)) return true;
+      delay(stepDelayMs);
+    }
+  } else {
+    for (int a = fromDeg; a > toDeg; a += step) {
+      writeServoAngle(a);
+      updateLed(modeAtStart, millis());
+      serviceNetwork();
+      if (shouldInterruptSession(modeAtStart)) return true;
+      delay(stepDelayMs);
+    }
+  }
+
+  writeServoAngle(toDeg);
+  return false;
+}
+
+void moveServoSmoothPark(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayMode ledMode) {
+  fromDeg = clampAngle(fromDeg);
+  toDeg   = clampAngle(toDeg);
+
+  if (fromDeg == toDeg) {
+    writeServoAngle(toDeg);
     return;
   }
 
@@ -213,50 +365,30 @@ void moveServoSmooth(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayM
 
   if (step > 0) {
     for (int a = fromDeg; a < toDeg; a += step) {
-      wandServo.write(clampAngle(a));
-      updateLed(mode, millis());
+      writeServoAngle(a);
+      updateLed(ledMode, millis());
       serviceNetwork();
       delay(stepDelayMs);
     }
   } else {
     for (int a = fromDeg; a > toDeg; a += step) {
-      wandServo.write(clampAngle(a));
-      updateLed(mode, millis());
+      writeServoAngle(a);
+      updateLed(ledMode, millis());
       serviceNetwork();
       delay(stepDelayMs);
     }
   }
 
-  wandServo.write(toDeg);
+  writeServoAngle(toDeg);
 }
 
-void moveToAngle(int targetDeg, int stepDelayMs, PlayMode mode) {
+bool moveToAngle(int targetDeg, int stepDelayMs, int stepDeg, PlayMode modeAtStart) {
   targetDeg = clampAngle(targetDeg);
-  moveServoSmooth(currentServoDeg, targetDeg, stepDelayMs, stepDegForMode(mode), mode);
-  currentServoDeg = targetDeg;
+  return moveServoSmooth(currentServoDeg, targetDeg, stepDelayMs, stepDeg, modeAtStart);
 }
 
-// Wait while keeping LED + web server alive.
-// Returns early if the switch mode changes or settings were updated.
-bool delayWithLedAndBreak(unsigned long ms, PlayMode modeAtStart) {
-  unsigned long start = millis();
-
-  while (millis() - start < ms) {
-    PlayMode currentMode = readModeSwitch();
-    updateLed(currentMode, millis());
-    serviceNetwork();
-
-    if (currentMode != modeAtStart) return true;
-
-    if (settingsChanged) {
-      settingsChanged = false;
-      return true;
-    }
-
-    delay(10);
-  }
-
-  return false;
+bool moveToRest(PlayMode modeAtStart, int stepDelayMs) {
+  return moveToAngle(SERVO_REST_DEG, stepDelayMs, BEGINNER_STEP_DEG, modeAtStart);
 }
 
 void applyServoWindow(int newMin, int newMax) {
@@ -267,10 +399,7 @@ void applyServoWindow(int newMin, int newMax) {
     SERVO_REST_DEG = (SERVO_MIN_DEG + SERVO_MAX_DEG) / 2;
   }
 
-  currentServoDeg = clampAngle(currentServoDeg);
-  if (wandServo.attached()) {
-    wandServo.write(currentServoDeg);
-  }
+  writeServoAngle(currentServoDeg);
   settingsChanged = true;
 }
 
@@ -279,28 +408,6 @@ void applyStepDelays(int beginnerMs, int intermediateMs, int advancedMs) {
   INTERMEDIATE_STEP_DELAY_MS = intermediateMs;
   ADVANCED_STEP_DELAY_MS = advancedMs;
   settingsChanged = true;
-}
-
-int randomSignedMagnitudeTenths(int minMagnitude10, int maxMagnitude10) {
-  int magnitude = random(minMagnitude10, maxMagnitude10 + 1);
-  return random(0, 2) == 0 ? -magnitude : magnitude;
-}
-
-int randomServoValueTenthsForMode(PlayMode mode) {
-  switch (mode) {
-    case MODE_BEGINNER:
-      return random(-6, 7);  // preserve gentler beginner motion
-
-    case MODE_INTERMEDIATE:
-      // Bias away from center so the swing reads clearly without going frantic.
-      return randomSignedMagnitudeTenths(4, 10);
-
-    case MODE_ADVANCED:
-      // Keep advanced near the outer portion of the safe range.
-      return randomSignedMagnitudeTenths(6, 10);
-  }
-
-  return random(-10, 11);
 }
 
 bool saveConfig() {
@@ -396,32 +503,222 @@ void loadConfig() {
   Serial.println(ADVANCED_STEP_DELAY_MS);
 }
 
-// ===== Web UI =====
+bool canAutoStartSessions() {
+  // Future scheduling should gate autonomous starts here without changing
+  // session behavior or low-level motion code.
+  return true;
+}
+
+bool doTease(PlayMode modeAtStart) {
+  int amp = teaseAmpForMode(modeAtStart);
+  int left  = clampAngle(SERVO_REST_DEG - amp);
+  int right = clampAngle(SERVO_REST_DEG + amp);
+  int speed = teaseSpeedForMode(modeAtStart);
+
+  int base = (random(2) == 0) ? left : right;
+  int hops = randRange(1, 3);
+
+  for (int i = 0; i < hops; i++) {
+    int jitter = randRange(-8, 8);
+    if (moveToAngle(clampAngle(base + jitter), speed, stepDegForMode(modeAtStart), modeAtStart)) {
+      return true;
+    }
+
+    if (delayResponsive((unsigned long)randRange(50, 160), modeAtStart)) {
+      return true;
+    }
+  }
+
+  return delayResponsive((unsigned long)randRange(60, 220), modeAtStart);
+}
+
+bool doBigDart(PlayMode modeAtStart) {
+  int amp = dartAmpForMode(modeAtStart);
+  int left  = clampAngle(SERVO_REST_DEG - amp);
+  int right = clampAngle(SERVO_REST_DEG + amp);
+  int speed = dartSpeedForMode(modeAtStart);
+  int dartStepDeg = stepDegForMode(modeAtStart) + DART_EXTRA_STEP_DEG;
+
+  bool startLeft = (random(2) == 0);
+  int start = startLeft ? left : right;
+  int end   = startLeft ? right : left;
+
+  if (moveToAngle(start, speed, dartStepDeg, modeAtStart)) return true;
+  if (delayResponsive((unsigned long)randRange(20, 75), modeAtStart)) return true;
+  if (moveToAngle(end, speed, dartStepDeg, modeAtStart)) return true;
+
+  if (random(3) == 0) {
+    if (moveToAngle(clampAngle(end + randRange(-10, 10)), speed, dartStepDeg, modeAtStart)) {
+      return true;
+    }
+  }
+
+  return delayResponsive((unsigned long)randRange(60, 220), modeAtStart);
+}
+
+bool hidePause(PlayMode modeAtStart) {
+  switch (modeAtStart) {
+    case MODE_BEGINNER:     return delayResponsive((unsigned long)randRange(2500, 4500), modeAtStart);
+    case MODE_INTERMEDIATE: return delayResponsive((unsigned long)randRange(2200, 4000), modeAtStart);
+    case MODE_ADVANCED:     return delayResponsive((unsigned long)randRange(1800, 3200), modeAtStart);
+  }
+  return false;
+}
+
+bool shortPause(PlayMode modeAtStart) {
+  switch (modeAtStart) {
+    case MODE_BEGINNER:     return delayResponsive((unsigned long)randRange(900, 2200), modeAtStart);
+    case MODE_INTERMEDIATE: return delayResponsive((unsigned long)randRange(600, 1800), modeAtStart);
+    case MODE_ADVANCED:     return delayResponsive((unsigned long)randRange(350, 1200), modeAtStart);
+  }
+  return false;
+}
+
+bool runChaosBurst(PlayMode modeAtStart, unsigned long chaosMs) {
+  unsigned long endMs = millis() + chaosMs;
+
+  while (millis() < endMs) {
+    if (doBigDart(modeAtStart)) return true;
+    if (doTease(modeAtStart)) return true;
+  }
+
+  return false;
+}
+
+bool runTimedSession(PlayMode modeAtStart, unsigned long sessionMs, bool allowMidChaos) {
+  unsigned long startMs = millis();
+  unsigned long endMs   = startMs + sessionMs;
+
+  unsigned long warmupMs = min((unsigned long)15000, sessionMs / 4);
+  unsigned long finaleMs = min((unsigned long)12000, sessionMs / 4);
+
+  if (moveToRest(modeAtStart, 10)) return true;
+  if (delayResponsive(250, modeAtStart)) return true;
+
+  unsigned long warmupEnd = startMs + warmupMs;
+  while (millis() < warmupEnd) {
+    if (doTease(modeAtStart)) return true;
+    if (random(5) == 0 && doBigDart(modeAtStart)) return true;
+    if (shortPause(modeAtStart)) return true;
+  }
+
+  unsigned long huntEnd = (endMs > finaleMs) ? (endMs - finaleMs) : endMs;
+  unsigned long lastHideAt = millis();
+  unsigned long nextHideAfter = randRangeUL(12000UL, 18000UL);
+  bool chaosInserted = false;
+  unsigned long chaosAt = startMs + (sessionMs / 2);
+
+  while (millis() < huntEnd) {
+    if (allowMidChaos && !chaosInserted && millis() >= chaosAt) {
+      if (runChaosBurst(modeAtStart, 6000UL)) return true;
+      chaosInserted = true;
+      if (shortPause(modeAtStart)) return true;
+    }
+
+    unsigned long burstLen = randRangeUL(2500UL, 7000UL);
+    unsigned long burstEnd = millis() + burstLen;
+    if (burstEnd > huntEnd) burstEnd = huntEnd;
+
+    int teasesUntilDart = randRange(2, (modeAtStart == MODE_ADVANCED) ? 4 : 5);
+
+    while (millis() < burstEnd) {
+      if (teasesUntilDart > 0) {
+        if (doTease(modeAtStart)) return true;
+        teasesUntilDart--;
+      } else {
+        if (doBigDart(modeAtStart)) return true;
+        teasesUntilDart = randRange(2, (modeAtStart == MODE_ADVANCED) ? 4 : 5);
+      }
+    }
+
+    unsigned long now = millis();
+    if (now - lastHideAt >= nextHideAfter && random(3) == 0) {
+      if (moveToRest(modeAtStart, 10)) return true;
+      if (hidePause(modeAtStart)) return true;
+      lastHideAt = millis();
+      nextHideAfter = randRangeUL(12000UL, 18000UL);
+    } else if (shortPause(modeAtStart)) {
+      return true;
+    }
+  }
+
+  while (millis() < endMs) {
+    if (doTease(modeAtStart)) return true;
+    if (doTease(modeAtStart)) return true;
+    if (doBigDart((modeAtStart == MODE_BEGINNER) ? MODE_INTERMEDIATE : modeAtStart)) return true;
+    if (moveToRest(modeAtStart, 9)) return true;
+    if (delayResponsive((unsigned long)randRange(200, 450), modeAtStart)) return true;
+  }
+
+  if (moveToRest(modeAtStart, 10)) return true;
+  return delayResponsive((unsigned long)randRange(1200, 2500), modeAtStart);
+}
+
+void finishSession(PlayMode modeAtEnd) {
+  parkRequested = false;
+
+  if (settingsChanged) {
+    settingsChanged = false;
+  }
+
+  moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, BEGINNER_STEP_DEG, modeAtEnd);
+
+  controllerState = STATE_RESTING;
+  lastSessionEndMs = millis();
+  sessionCounter++;
+  nextAutoSessionMs = lastSessionEndMs + restDurationMsForMode(modeAtEnd);
+
+  Serial.print("Session complete. Next auto session in ");
+  Serial.print((nextAutoSessionMs - lastSessionEndMs) / 1000UL);
+  Serial.println(" s");
+}
+
+void runSessionForMode(PlayMode modeAtStart) {
+  controllerState = STATE_SESSION;
+  forceSessionRequested = false;
+
+  unsigned long sessionMs = sessionDurationMsForMode(modeAtStart);
+  bool allowMidChaos = (((sessionCounter + 1UL) % 3UL) == 0UL);
+
+  Serial.print("Starting ");
+  Serial.print(modeName(modeAtStart));
+  Serial.print(" session for ");
+  Serial.print(sessionMs / 1000UL);
+  Serial.println(" s");
+
+  runTimedSession(modeAtStart, sessionMs, allowMidChaos);
+  finishSession(modeAtStart);
+}
+
 String htmlPage() {
   PlayMode mode = readModeSwitch();
+  unsigned long now = millis();
 
   String page;
-  page.reserve(3200);
+  page.reserve(4200);
 
   page += F(
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Cat Toy Control</title>"
     "<style>"
-    "body{font-family:Arial,sans-serif;max-width:680px;margin:24px auto;padding:0 16px;line-height:1.45;}"
+    "body{font-family:Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;line-height:1.45;}"
     ".card{border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:16px;}"
     ".hint{background:#f7f7f7;border-left:4px solid #4f6d4a;}"
+    ".meta{color:#444;font-size:14px;}"
+    ".actions form{display:inline-block;margin:8px 8px 0 0;}"
     "label{display:block;margin-top:12px;font-weight:600;}"
     "input[type=number]{width:100%;padding:10px;font-size:16px;box-sizing:border-box;}"
     "button{margin-top:16px;padding:12px 16px;font-size:16px;border-radius:10px;border:0;cursor:pointer;}"
-    ".meta{color:#444;font-size:14px;}"
-    ".ok{color:#0a7a2f;font-weight:600;}"
+    ".secondary{background:#ececec;color:#111;}"
     "</style></head><body>"
     "<h1>Cat Toy Control</h1>"
-    "<div class='card'>"
   );
 
+  page += F("<div class='card'>");
   page += F("<div><strong>Current mode:</strong> ");
   page += modeName(mode);
+  page += F("</div><div><strong>Runtime state:</strong> ");
+  page += controllerStateName(controllerState);
   page += F("</div><div><strong>Current servo window:</strong> ");
   page += String(SERVO_MIN_DEG);
   page += F("&deg; to ");
@@ -430,11 +727,34 @@ String htmlPage() {
   page += String(SERVO_REST_DEG);
   page += F("&deg;</div><div><strong>Current swing from rest:</strong> up to ");
   page += String(maxSafeAmplitude());
-  page += F("&deg; each side</div></div>");
+  page += F("&deg; each side</div>");
+
+  if (controllerState == STATE_STARTUP) {
+    unsigned long warmupRemainingMs = (startupEndMs > now) ? (startupEndMs - now) : 0;
+    page += F("<div><strong>Warmup remaining:</strong> ");
+    page += String(warmupRemainingMs / 1000UL);
+    page += F(" s</div>");
+  } else {
+    unsigned long nextInMs = (nextAutoSessionMs > now) ? (nextAutoSessionMs - now) : 0;
+    page += F("<div><strong>Next auto session:</strong> ");
+    page += String(nextInMs / 1000UL);
+    page += F(" s</div>");
+  }
+
+  page += F("</div>");
+
+  page += F("<div class='card hint'><strong>Runtime model</strong>"
+            "<p class='meta'>This sketch now runs autonomous play sessions with rest periods between them. The local web UI changes settings and can trigger or park sessions, but basic play still works without visiting this page.</p>"
+            "<p class='meta'>That session boundary is the future hook for planned or scheduled play windows.</p></div>");
+
+  page += F("<div class='card actions'><strong>Manual control</strong>"
+            "<form action='/start' method='post'><button type='submit'>Start Session Now</button></form>"
+            "<form action='/park' method='post'><button class='secondary' type='submit'>Park At Rest</button></form>"
+            "<p class='meta'>Start now forces the next session immediately. Park ends the current session as soon as the sketch reaches an interrupt check and returns the servo to rest.</p></div>");
 
   page += F("<div class='card hint'><strong>How to widen swings</strong>"
             "<p class='meta'>The toy swings inside the servo window set below. Lowering the minimum angle and/or raising the maximum angle gives the servo more room to travel. A wider gap usually means stronger-looking swings, as long as your hardware can move safely in that range.</p>"
-            "<p class='meta'>Beginner stays gentler. Intermediate and Advanced now aim farther from center and move faster.</p></div>");
+            "<p class='meta'>Beginner stays gentler. Intermediate and Advanced use more of the safe window and shorter rests.</p></div>");
 
   page += F("<div class='card hint'><strong>How to change swing speed</strong>"
             "<p class='meta'>These speed settings control how many milliseconds the sketch waits between small servo steps. Lower numbers move faster. Higher numbers move slower and softer.</p>"
@@ -470,7 +790,6 @@ String htmlPage() {
   page += F("</form>");
   page += F("<p class='meta'>For safety this sketch requires max &gt; min and at least 20 degrees of spread. "
             "When you apply a new window, the rest position is re-centered automatically and the setting is saved to LittleFS for the next boot.</p>");
-  page += F("<p class='meta'>Example: changing 25&deg;-155&deg; to 15&deg;-165&deg; gives the servo a wider safe play area, if your toy can handle it without hitting stops or the teaser wire.</p>");
   page += F("<p class='meta'>Speed delay range is 2-25 ms. Lower is faster.</p>");
   page += F("</div>");
 
@@ -501,24 +820,9 @@ void handleSet() {
   int newIntermediateDelay = server.arg("intermediateDelay").toInt();
   int newAdvancedDelay = server.arg("advancedDelay").toInt();
 
-  // Safety checks
-  if (newMin < 0 || newMin > 170) {
-    server.send(400, "text/plain", "SERVO_MIN_DEG must be between 0 and 170.");
-    return;
-  }
-
-  if (newMax < 10 || newMax > 180) {
-    server.send(400, "text/plain", "SERVO_MAX_DEG must be between 10 and 180.");
-    return;
-  }
-
-  if (newMax <= newMin) {
-    server.send(400, "text/plain", "SERVO_MAX_DEG must be greater than SERVO_MIN_DEG.");
-    return;
-  }
-
-  if ((newMax - newMin) < 20) {
-    server.send(400, "text/plain", "Keep at least 20 degrees between min and max.");
+  if (!validateServoWindow(newMin, newMax)) {
+    server.send(400, "text/plain",
+                "Servo limits must stay in range, keep max > min, and keep at least 20 degrees between them.");
     return;
   }
 
@@ -553,54 +857,24 @@ void handleSet() {
   server.send(303, "text/plain", "");
 }
 
-void handleNotFound() {
-  server.send(404, "text/plain", "Not found");
+void handleStart() {
+  forceSessionRequested = true;
+  parkRequested = false;
+  nextAutoSessionMs = millis();
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
 }
 
-// ===== Motion logic =====
-void runOneMove(PlayMode mode) {
-  int servoValue10 = 0;
-  unsigned long sleepMs = 0;
+void handlePark() {
+  parkRequested = true;
+  forceSessionRequested = false;
+  nextAutoSessionMs = millis() + restDurationMsForMode(readModeSwitch());
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
+}
 
-  // Mirrors your earlier Pi behavior:
-  // beginner:     value in [-0.6, +0.6], sleep 0..3 sec
-  // intermediate: value in [-1.0, +1.0], sleep 0..2 sec
-  // advanced:     value in [-1.0, +1.0], sleep 0..1 sec
-  switch (mode) {
-    case MODE_BEGINNER:
-      servoValue10 = randomServoValueTenthsForMode(mode);
-      sleepMs = (unsigned long)random(0, 4) * 1000UL;
-      break;
-
-    case MODE_INTERMEDIATE:
-      servoValue10 = randomServoValueTenthsForMode(mode);
-      sleepMs = (unsigned long)random(0, 3) * 1000UL;
-      break;
-
-    case MODE_ADVANCED:
-      servoValue10 = randomServoValueTenthsForMode(mode);
-      sleepMs = (unsigned long)random(0, 2) * 1000UL;
-      break;
-  }
-
-  int targetDeg = servoValueTenthsToAngle(servoValue10);
-
-  Serial.print("Mode: ");
-  Serial.print(modeName(mode));
-  Serial.print(" | Value: ");
-  Serial.print(servoValue10 / 10.0);
-  Serial.print(" | Target angle: ");
-  Serial.print(targetDeg);
-  Serial.print(" | Window: ");
-  Serial.print(SERVO_MIN_DEG);
-  Serial.print("-");
-  Serial.print(SERVO_MAX_DEG);
-  Serial.print(" | Sleep: ");
-  Serial.print(sleepMs);
-  Serial.println(" ms");
-
-  moveToAngle(targetDeg, stepDelayMsForMode(mode), mode);
-  delayWithLedAndBreak(sleepMs, mode);
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
 }
 
 void setup() {
@@ -625,13 +899,17 @@ void setup() {
   currentServoDeg = clampAngle(SERVO_REST_DEG);
 
   wandServo.attach(SERVO_PIN);
-  wandServo.write(currentServoDeg);
+  writeServoAngle(currentServoDeg);
 
   ledState = false;
   setLed(false);
   lastLedToggleMs = millis();
 
-  // Start local AP + web server
+  startupEndMs = millis() + STARTUP_WARMUP_MS;
+  controllerState = STATE_STARTUP;
+  nextAutoSessionMs = startupEndMs;
+  settingsChanged = false;
+
   WiFi.mode(WIFI_AP);
   bool ok = WiFi.softAP(AP_SSID, AP_PASS);
 
@@ -645,16 +923,58 @@ void setup() {
   Serial.println(WiFi.softAPIP());
 
   server.on("/", handleRoot);
-  server.on("/set", handleSet);
+  server.on("/set", HTTP_GET, handleSet);
+  server.on("/start", HTTP_POST, handleStart);
+  server.on("/park", HTTP_POST, handlePark);
   server.onNotFound(handleNotFound);
   server.begin();
 }
 
 void loop() {
   PlayMode mode = readModeSwitch();
+  unsigned long now = millis();
 
-  updateLed(mode, millis());
+  updateLed(mode, now);
   serviceNetwork();
 
-  runOneMove(mode);
+  if (controllerState == STATE_STARTUP) {
+    if (currentServoDeg != SERVO_REST_DEG) {
+      writeServoAngle(SERVO_REST_DEG);
+    }
+
+    if (now >= startupEndMs) {
+      controllerState = STATE_RESTING;
+      nextAutoSessionMs = now;
+    }
+
+    delay(10);
+    return;
+  }
+
+  if (controllerState != STATE_SESSION && settingsChanged) {
+    settingsChanged = false;
+  }
+
+  if (parkRequested && controllerState != STATE_SESSION) {
+    moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, BEGINNER_STEP_DEG, mode);
+    parkRequested = false;
+  }
+
+  if (controllerState != STATE_SESSION && currentServoDeg != SERVO_REST_DEG) {
+    moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, BEGINNER_STEP_DEG, mode);
+  }
+
+  bool shouldStart = false;
+
+  if (forceSessionRequested) {
+    shouldStart = true;
+  } else if (controllerState == STATE_RESTING && now >= nextAutoSessionMs && canAutoStartSessions()) {
+    shouldStart = true;
+  }
+
+  if (shouldStart) {
+    runSessionForMode(mode);
+  }
+
+  delay(20);
 }
