@@ -1610,8 +1610,8 @@ String htmlPage() {
   page += F("<p class='meta'>Servo limits must keep max &gt; min with at least 20 degrees of spread. Rest remains auto-centered in the safe window.</p>");
   page += F("</div>");
 
-  page += F("<div class='card'><form action='/network' method='post'>");
-  page += F("<strong>Wi-Fi and schedule</strong>");
+  page += F("<div class='card'><strong>Wi-Fi and schedule</strong>");
+  page += F("<form action='/wifi' method='post'>");
   page += F("<label for='wifiSsid'>Home Wi-Fi SSID</label>");
   page += F("<input id='wifiSsid' name='wifiSsid' type='text' maxlength='32' value='");
   page += htmlEscape(WIFI_SSID);
@@ -1621,7 +1621,11 @@ String htmlPage() {
   page += F("<input id='wifiPass' name='wifiPass' type='password' maxlength='63' value='");
   page += htmlEscape(WIFI_PASS);
   page += F("'>");
+  page += F("<button type='submit'>Save Wi-Fi</button>");
+  page += F("</form>");
+  page += F("<form action='/clear-wifi' method='post'><button class='danger' type='submit'>Clear Saved Wi-Fi</button></form>");
 
+  page += F("<form action='/schedule' method='post'>");
   page += F("<label for='timezoneTz'>Timezone</label><select id='timezoneTz' name='timezoneTz'>");
   for (size_t i = 0; i < sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]); i++) {
     page += F("<option value='");
@@ -1648,9 +1652,8 @@ String htmlPage() {
   page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
   page += F("'>");
 
-  page += F("<button type='submit'>Save Wi-Fi and Schedule</button>");
+  page += F("<button type='submit'>Save Schedule</button>");
   page += F("</form>");
-  page += F("<form action='/clear-wifi' method='post'><button class='danger' type='submit'>Clear Saved Wi-Fi</button></form>");
   page += F("<p class='meta'>Use the boot gesture Lazy -> Playful -> Lazy during the first 4 seconds after boot to keep the toy in AP-only Wi-Fi setup mode for that boot.</p>");
   page += F("<p class='meta'>If start and end times match, the schedule is treated as all day. Overnight windows are supported.</p>");
   page += F("</div>");
@@ -1740,18 +1743,9 @@ void handleSet() {
   server.send(303, "text/plain", "");
 }
 
-void handleNetworkSave() {
-  if (!server.hasArg("timezoneTz") || !server.hasArg("scheduleStart") || !server.hasArg("scheduleEnd")) {
-    server.send(400, "text/plain", "Missing one or more required Wi-Fi or schedule parameters.");
-    return;
-  }
-
+void handleWifiSave() {
   String wifiSsid = server.arg("wifiSsid");
   String wifiPass = server.arg("wifiPass");
-  String timezoneTz = server.arg("timezoneTz");
-  bool scheduleEnabled = server.hasArg("scheduleEnabled");
-  int scheduleStartMinute = 0;
-  int scheduleEndMinute = 0;
 
   if (wifiSsid.length() > WIFI_SSID_MAX_LEN) {
     server.send(400, "text/plain", "Wi-Fi SSID must be 32 characters or fewer.");
@@ -1772,6 +1766,50 @@ void handleNetworkSave() {
     wifiPass = "";
   }
 
+  applyWifiCredentials(wifiSsid, wifiPass);
+
+  if (!saveWifiConfig()) {
+    server.send(500, "text/plain", "Updated Wi-Fi settings for this boot, but failed to save to LittleFS.");
+    return;
+  }
+
+  wifiSetupModeForced = false;
+  bootGestureWindowClosed = true;
+  networkBootStarted = false;
+  stationConnectAttemptActive = false;
+  stationWasConnected = false;
+
+  if (hasSavedWifiCredentials) {
+    WiFi.disconnect();
+    resetTimeState("Wi-Fi config updated");
+    Serial.println("Saved Wi-Fi settings updated. Starting AP+STA background connection.");
+  } else {
+    WiFi.disconnect();
+    WiFi.mode(WIFI_AP);
+    bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
+    resetTimeState("Wi-Fi credentials cleared by empty save");
+    networkBootStarted = true;
+    Serial.print("Wi-Fi credentials cleared by save. AP status: ");
+    Serial.println(apOk ? "READY" : "FAILED");
+  }
+
+  logScheduleDecisionIfChanged(SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED);
+
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
+}
+
+void handleScheduleSave() {
+  if (!server.hasArg("timezoneTz") || !server.hasArg("scheduleStart") || !server.hasArg("scheduleEnd")) {
+    server.send(400, "text/plain", "Missing one or more required schedule parameters.");
+    return;
+  }
+
+  String timezoneTz = server.arg("timezoneTz");
+  bool scheduleEnabled = server.hasArg("scheduleEnabled");
+  int scheduleStartMinute = 0;
+  int scheduleEndMinute = 0;
+
   if (!validateTimezoneTz(timezoneTz)) {
     server.send(400, "text/plain", "Timezone selection is invalid.");
     return;
@@ -1788,39 +1826,20 @@ void handleNetworkSave() {
     return;
   }
 
-  applyWifiCredentials(wifiSsid, wifiPass);
   applyTimezoneSetting(timezoneTz);
   applyScheduleConfig(scheduleEnabled, scheduleStartMinute, scheduleEndMinute);
 
-  bool wifiSaved = saveWifiConfig();
-  bool scheduleSaved = saveScheduleConfig();
-  if (!wifiSaved || !scheduleSaved) {
-    server.send(500, "text/plain",
-                "Updated Wi-Fi and schedule settings for this boot, but failed to save one or more LittleFS config files.");
+  if (!saveScheduleConfig()) {
+    server.send(500, "text/plain", "Updated schedule settings for this boot, but failed to save to LittleFS.");
     return;
   }
 
-  wifiSetupModeForced = false;
-  bootGestureWindowClosed = true;
-  networkBootStarted = false;
-  stationConnectAttemptActive = false;
-  stationWasConnected = false;
-
-  if (hasSavedWifiCredentials) {
-    WiFi.disconnect();
-    resetTimeState("Wi-Fi config updated");
-    Serial.println("Saved Wi-Fi and schedule settings updated. Starting AP+STA background connection.");
-  } else {
-    WiFi.disconnect();
-    WiFi.mode(WIFI_AP);
-    bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
-    resetTimeState("Wi-Fi credentials cleared by empty save");
-    networkBootStarted = true;
-    Serial.print("Wi-Fi credentials cleared by save. AP status: ");
-    Serial.println(apOk ? "READY" : "FAILED");
+  if (timeValid && isTimeValid()) {
+    applyTimezoneIfNeeded();
   }
 
-  logScheduleDecisionIfChanged(SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED);
+  canAutoStartSessions();
+  Serial.println("Saved schedule settings updated.");
 
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
@@ -1935,7 +1954,8 @@ void setup() {
 
   server.on("/", handleRoot);
   server.on("/set", HTTP_GET, handleSet);
-  server.on("/network", HTTP_POST, handleNetworkSave);
+  server.on("/wifi", HTTP_POST, handleWifiSave);
+  server.on("/schedule", HTTP_POST, handleScheduleSave);
   server.on("/clear-wifi", HTTP_POST, handleClearWifi);
   server.on("/start", HTTP_POST, handleStart);
   server.on("/park", HTTP_POST, handlePark);
