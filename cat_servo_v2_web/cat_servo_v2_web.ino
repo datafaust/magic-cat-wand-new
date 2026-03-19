@@ -42,9 +42,9 @@ const int INTERMEDIATE_STEP_DEG = 3;
 const int ADVANCED_STEP_DEG     = 4;
 
 // Smaller delay = faster motion
-const int BEGINNER_STEP_DELAY_MS     = 10;
-const int INTERMEDIATE_STEP_DELAY_MS = 6;
-const int ADVANCED_STEP_DELAY_MS     = 4;
+int BEGINNER_STEP_DELAY_MS     = 10;
+int INTERMEDIATE_STEP_DELAY_MS = 6;
+int ADVANCED_STEP_DELAY_MS     = 4;
 
 Servo wandServo;
 
@@ -80,6 +80,10 @@ bool validateServoWindow(int newMin, int newMax) {
   if (newMax <= newMin) return false;
   if ((newMax - newMin) < 20) return false;
   return true;
+}
+
+bool validateStepDelayMs(int value) {
+  return value >= 2 && value <= 25;
 }
 
 bool extractJsonInt(const String& json, const char* key, int& valueOut) {
@@ -270,6 +274,13 @@ void applyServoWindow(int newMin, int newMax) {
   settingsChanged = true;
 }
 
+void applyStepDelays(int beginnerMs, int intermediateMs, int advancedMs) {
+  BEGINNER_STEP_DELAY_MS = beginnerMs;
+  INTERMEDIATE_STEP_DELAY_MS = intermediateMs;
+  ADVANCED_STEP_DELAY_MS = advancedMs;
+  settingsChanged = true;
+}
+
 int randomSignedMagnitudeTenths(int minMagnitude10, int maxMagnitude10) {
   int magnitude = random(minMagnitude10, maxMagnitude10 + 1);
   return random(0, 2) == 0 ? -magnitude : magnitude;
@@ -305,6 +316,12 @@ bool saveConfig() {
   json += String(SERVO_MIN_DEG);
   json += ",\"servoMaxDeg\":";
   json += String(SERVO_MAX_DEG);
+  json += ",\"beginnerStepDelayMs\":";
+  json += String(BEGINNER_STEP_DELAY_MS);
+  json += ",\"intermediateStepDelayMs\":";
+  json += String(INTERMEDIATE_STEP_DELAY_MS);
+  json += ",\"advancedStepDelayMs\":";
+  json += String(ADVANCED_STEP_DELAY_MS);
   json += "}\n";
 
   size_t written = file.print(json);
@@ -337,6 +354,9 @@ void loadConfig() {
 
   int savedMin = 0;
   int savedMax = 0;
+  int savedBeginnerDelay = BEGINNER_STEP_DELAY_MS;
+  int savedIntermediateDelay = INTERMEDIATE_STEP_DELAY_MS;
+  int savedAdvancedDelay = ADVANCED_STEP_DELAY_MS;
 
   if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
       !extractJsonInt(json, "servoMaxDeg", savedMax)) {
@@ -351,10 +371,29 @@ void loadConfig() {
 
   applyServoWindow(savedMin, savedMax);
 
+  bool hasBeginnerDelay = extractJsonInt(json, "beginnerStepDelayMs", savedBeginnerDelay);
+  bool hasIntermediateDelay = extractJsonInt(json, "intermediateStepDelayMs", savedIntermediateDelay);
+  bool hasAdvancedDelay = extractJsonInt(json, "advancedStepDelayMs", savedAdvancedDelay);
+
+  if (hasBeginnerDelay && hasIntermediateDelay && hasAdvancedDelay &&
+      validateStepDelayMs(savedBeginnerDelay) &&
+      validateStepDelayMs(savedIntermediateDelay) &&
+      validateStepDelayMs(savedAdvancedDelay)) {
+    applyStepDelays(savedBeginnerDelay, savedIntermediateDelay, savedAdvancedDelay);
+  } else if (hasBeginnerDelay || hasIntermediateDelay || hasAdvancedDelay) {
+    Serial.println("Saved speed settings invalid. Using default speed settings.");
+  }
+
   Serial.print("Loaded servo window from LittleFS: ");
   Serial.print(SERVO_MIN_DEG);
   Serial.print(" to ");
   Serial.println(SERVO_MAX_DEG);
+  Serial.print("Loaded step delays (ms): ");
+  Serial.print(BEGINNER_STEP_DELAY_MS);
+  Serial.print(", ");
+  Serial.print(INTERMEDIATE_STEP_DELAY_MS);
+  Serial.print(", ");
+  Serial.println(ADVANCED_STEP_DELAY_MS);
 }
 
 // ===== Web UI =====
@@ -362,7 +401,7 @@ String htmlPage() {
   PlayMode mode = readModeSwitch();
 
   String page;
-  page.reserve(2200);
+  page.reserve(3200);
 
   page += F(
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -397,6 +436,10 @@ String htmlPage() {
             "<p class='meta'>The toy swings inside the servo window set below. Lowering the minimum angle and/or raising the maximum angle gives the servo more room to travel. A wider gap usually means stronger-looking swings, as long as your hardware can move safely in that range.</p>"
             "<p class='meta'>Beginner stays gentler. Intermediate and Advanced now aim farther from center and move faster.</p></div>");
 
+  page += F("<div class='card hint'><strong>How to change swing speed</strong>"
+            "<p class='meta'>These speed settings control how many milliseconds the sketch waits between small servo steps. Lower numbers move faster. Higher numbers move slower and softer.</p>"
+            "<p class='meta'>Change these gradually. If you set them too low, motion can get jerky or mechanically harsh.</p></div>");
+
   page += F("<div class='card'><form action='/set' method='get'>");
   page += F("<label for='min'>Left limit / minimum angle (SERVO_MIN_DEG)</label>");
   page += F("<input id='min' name='min' type='number' min='0' max='170' value='");
@@ -408,11 +451,27 @@ String htmlPage() {
   page += String(SERVO_MAX_DEG);
   page += F("'>");
 
+  page += F("<label for='beginnerDelay'>Beginner speed delay in ms</label>");
+  page += F("<input id='beginnerDelay' name='beginnerDelay' type='number' min='2' max='25' value='");
+  page += String(BEGINNER_STEP_DELAY_MS);
+  page += F("'>");
+
+  page += F("<label for='intermediateDelay'>Intermediate speed delay in ms</label>");
+  page += F("<input id='intermediateDelay' name='intermediateDelay' type='number' min='2' max='25' value='");
+  page += String(INTERMEDIATE_STEP_DELAY_MS);
+  page += F("'>");
+
+  page += F("<label for='advancedDelay'>Advanced speed delay in ms</label>");
+  page += F("<input id='advancedDelay' name='advancedDelay' type='number' min='2' max='25' value='");
+  page += String(ADVANCED_STEP_DELAY_MS);
+  page += F("'>");
+
   page += F("<button type='submit'>Apply</button>");
   page += F("</form>");
   page += F("<p class='meta'>For safety this sketch requires max &gt; min and at least 20 degrees of spread. "
             "When you apply a new window, the rest position is re-centered automatically and the setting is saved to LittleFS for the next boot.</p>");
   page += F("<p class='meta'>Example: changing 25&deg;-155&deg; to 15&deg;-165&deg; gives the servo a wider safe play area, if your toy can handle it without hitting stops or the teaser wire.</p>");
+  page += F("<p class='meta'>Speed delay range is 2-25 ms. Lower is faster.</p>");
   page += F("</div>");
 
   page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
@@ -428,13 +487,19 @@ void handleRoot() {
 }
 
 void handleSet() {
-  if (!server.hasArg("min") || !server.hasArg("max")) {
-    server.send(400, "text/plain", "Missing min or max parameter.");
+  if (!server.hasArg("min") || !server.hasArg("max") ||
+      !server.hasArg("beginnerDelay") ||
+      !server.hasArg("intermediateDelay") ||
+      !server.hasArg("advancedDelay")) {
+    server.send(400, "text/plain", "Missing one or more required parameters.");
     return;
   }
 
   int newMin = server.arg("min").toInt();
   int newMax = server.arg("max").toInt();
+  int newBeginnerDelay = server.arg("beginnerDelay").toInt();
+  int newIntermediateDelay = server.arg("intermediateDelay").toInt();
+  int newAdvancedDelay = server.arg("advancedDelay").toInt();
 
   // Safety checks
   if (newMin < 0 || newMin > 170) {
@@ -457,11 +522,19 @@ void handleSet() {
     return;
   }
 
+  if (!validateStepDelayMs(newBeginnerDelay) ||
+      !validateStepDelayMs(newIntermediateDelay) ||
+      !validateStepDelayMs(newAdvancedDelay)) {
+    server.send(400, "text/plain", "Each speed delay must be between 2 and 25 ms.");
+    return;
+  }
+
   applyServoWindow(newMin, newMax);
+  applyStepDelays(newBeginnerDelay, newIntermediateDelay, newAdvancedDelay);
 
   if (!saveConfig()) {
     server.send(500, "text/plain",
-                "Updated servo window for this boot, but failed to save to LittleFS.");
+                "Updated settings for this boot, but failed to save to LittleFS.");
     return;
   }
 
@@ -469,6 +542,12 @@ void handleSet() {
   Serial.print(SERVO_MIN_DEG);
   Serial.print(" to ");
   Serial.println(SERVO_MAX_DEG);
+  Serial.print("Updated step delays (ms): ");
+  Serial.print(BEGINNER_STEP_DELAY_MS);
+  Serial.print(", ");
+  Serial.print(INTERMEDIATE_STEP_DELAY_MS);
+  Serial.print(", ");
+  Serial.println(ADVANCED_STEP_DELAY_MS);
 
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
