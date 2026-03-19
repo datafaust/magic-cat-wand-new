@@ -809,6 +809,9 @@ void serviceStationConnection() {
 void serviceTimeState() {
   if (WiFi.status() != WL_CONNECTED) return;
 
+  // Re-apply any pending timezone change even while an NTP sync is already in flight.
+  applyTimezoneIfNeeded();
+
   if (!timeSyncRequested) {
     beginTimeSync();
     return;
