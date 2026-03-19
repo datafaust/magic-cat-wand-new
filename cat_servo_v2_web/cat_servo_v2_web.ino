@@ -23,7 +23,10 @@
 const char* AP_SSID = "CatToy-Setup";
 const char* AP_PASS = "cattoy123";
 
-const char* CONFIG_PATH = "/config.json";
+const char* LEGACY_CONFIG_PATH = "/config.json";
+const char* MOTION_CONFIG_PATH = "/motion.json";
+const char* WIFI_CONFIG_PATH = "/wifi.json";
+const char* SCHEDULE_CONFIG_PATH = "/schedule.json";
 
 const int SERVO_PIN  = D5;
 const int LED_PIN    = D4;
@@ -342,6 +345,45 @@ bool extractJsonString(const String& json, const char* key, String& valueOut) {
   }
 
   return false;
+}
+
+bool readJsonFileIfExists(const char* path, String& jsonOut) {
+  if (!littleFsReady || !LittleFS.exists(path)) return false;
+
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    Serial.print("Failed to open ");
+    Serial.print(path);
+    Serial.println(" for read.");
+    return false;
+  }
+
+  jsonOut = file.readString();
+  file.close();
+  return true;
+}
+
+bool writeJsonFile(const char* path, const String& json) {
+  if (!littleFsReady) return false;
+
+  File file = LittleFS.open(path, "w");
+  if (!file) {
+    Serial.print("Failed to open ");
+    Serial.print(path);
+    Serial.println(" for write.");
+    return false;
+  }
+
+  size_t written = file.print(json);
+  file.close();
+
+  if (written != json.length()) {
+    Serial.print("Failed to write full JSON file: ");
+    Serial.println(path);
+    return false;
+  }
+
+  return true;
 }
 
 int maxSafeAmplitude() {
@@ -986,15 +1028,7 @@ void applyRestWindowMinutes(int minMinutes, int maxMinutes) {
   settingsChanged = true;
 }
 
-bool saveConfig() {
-  if (!littleFsReady) return false;
-
-  File file = LittleFS.open(CONFIG_PATH, "w");
-  if (!file) {
-    Serial.println("Failed to open config file for write.");
-    return false;
-  }
-
+bool saveMotionConfig() {
   String json = "{\"servoMinDeg\":";
   json += String(SERVO_MIN_DEG);
   json += ",\"servoMaxDeg\":";
@@ -1009,11 +1043,23 @@ bool saveConfig() {
   json += String(AUTO_REST_MIN_MINUTES);
   json += ",\"autoRestMaxMinutes\":";
   json += String(AUTO_REST_MAX_MINUTES);
-  json += ",\"wifiSsid\":\"";
+  json += "}\n";
+
+  return writeJsonFile(MOTION_CONFIG_PATH, json);
+}
+
+bool saveWifiConfig() {
+  String json = "{\"wifiSsid\":\"";
   json += jsonEscape(WIFI_SSID);
   json += "\",\"wifiPass\":\"";
   json += jsonEscape(WIFI_PASS);
-  json += "\",\"timezoneTz\":\"";
+  json += "\"}\n";
+
+  return writeJsonFile(WIFI_CONFIG_PATH, json);
+}
+
+bool saveScheduleConfig() {
+  String json = "{\"timezoneTz\":\"";
   json += jsonEscape(TIMEZONE_TZ);
   json += "\",\"scheduleEnabled\":";
   json += SCHEDULE_ENABLED ? "true" : "false";
@@ -1023,33 +1069,21 @@ bool saveConfig() {
   json += String(SCHEDULE_END_MINUTE);
   json += "}\n";
 
-  size_t written = file.print(json);
-  file.close();
-
-  if (written != json.length()) {
-    Serial.println("Failed to write full config file.");
-    return false;
-  }
-
-  return true;
+  return writeJsonFile(SCHEDULE_CONFIG_PATH, json);
 }
 
-void loadConfig() {
+void loadMotionConfig() {
   if (!littleFsReady) return;
 
-  if (!LittleFS.exists(CONFIG_PATH)) {
-    Serial.println("No saved config found. Using defaults.");
-    return;
+  String json;
+  bool loadedFromLegacy = false;
+  if (!readJsonFileIfExists(MOTION_CONFIG_PATH, json)) {
+    if (!readJsonFileIfExists(LEGACY_CONFIG_PATH, json)) {
+      Serial.println("No saved motion config found. Using defaults.");
+      return;
+    }
+    loadedFromLegacy = true;
   }
-
-  File file = LittleFS.open(CONFIG_PATH, "r");
-  if (!file) {
-    Serial.println("Failed to open config file for read. Using defaults.");
-    return;
-  }
-
-  String json = file.readString();
-  file.close();
 
   int savedMin = 0;
   int savedMax = 0;
@@ -1058,16 +1092,10 @@ void loadConfig() {
   int savedZoomiesDelay = ZOOMIES_STEP_DELAY_MS;
   int savedRestMinMinutes = AUTO_REST_MIN_MINUTES;
   int savedRestMaxMinutes = AUTO_REST_MAX_MINUTES;
-  int savedScheduleStartMinute = SCHEDULE_START_MINUTE;
-  int savedScheduleEndMinute = SCHEDULE_END_MINUTE;
-  bool savedScheduleEnabled = SCHEDULE_ENABLED;
-  String savedWifiSsid = WIFI_SSID;
-  String savedWifiPass = WIFI_PASS;
-  String savedTimezoneTz = TIMEZONE_TZ;
 
   if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
       !extractJsonInt(json, "servoMaxDeg", savedMax)) {
-    Serial.println("Config file missing required fields. Using defaults.");
+    Serial.println("Motion config missing required fields. Using defaults.");
     return;
   }
 
@@ -1104,6 +1132,40 @@ void loadConfig() {
     Serial.println("Saved rest window is invalid. Using default rest window.");
   }
 
+  Serial.print("Loaded servo window from ");
+  Serial.print(loadedFromLegacy ? LEGACY_CONFIG_PATH : MOTION_CONFIG_PATH);
+  Serial.print(": ");
+  Serial.print(SERVO_MIN_DEG);
+  Serial.print(" to ");
+  Serial.println(SERVO_MAX_DEG);
+  Serial.print("Loaded step delays (ms): ");
+  Serial.print(LAZY_STEP_DELAY_MS);
+  Serial.print(", ");
+  Serial.print(PLAYFUL_STEP_DELAY_MS);
+  Serial.print(", ");
+  Serial.println(ZOOMIES_STEP_DELAY_MS);
+  Serial.print("Loaded rest window (minutes): ");
+  Serial.print(AUTO_REST_MIN_MINUTES);
+  Serial.print(" to ");
+  Serial.println(AUTO_REST_MAX_MINUTES);
+}
+
+void loadWifiConfig() {
+  if (!littleFsReady) return;
+
+  String json;
+  bool loadedFromLegacy = false;
+  if (!readJsonFileIfExists(WIFI_CONFIG_PATH, json)) {
+    if (!readJsonFileIfExists(LEGACY_CONFIG_PATH, json)) {
+      Serial.println("No saved Wi-Fi config found. Using defaults.");
+      return;
+    }
+    loadedFromLegacy = true;
+  }
+
+  String savedWifiSsid = WIFI_SSID;
+  String savedWifiPass = WIFI_PASS;
+
   if (extractJsonString(json, "wifiSsid", savedWifiSsid)) {
     if (savedWifiSsid.length() > WIFI_SSID_MAX_LEN) {
       Serial.println("Saved Wi-Fi SSID too long. Ignoring saved SSID.");
@@ -1117,6 +1179,31 @@ void loadConfig() {
       savedWifiPass = "";
     }
   }
+
+  applyWifiCredentials(savedWifiSsid, savedWifiPass);
+  Serial.print("Loaded Wi-Fi SSID from ");
+  Serial.print(loadedFromLegacy ? LEGACY_CONFIG_PATH : WIFI_CONFIG_PATH);
+  Serial.print(": ");
+  Serial.println(hasSavedWifiCredentials ? WIFI_SSID : "(none)");
+}
+
+void loadScheduleConfig() {
+  if (!littleFsReady) return;
+
+  String json;
+  bool loadedFromLegacy = false;
+  if (!readJsonFileIfExists(SCHEDULE_CONFIG_PATH, json)) {
+    if (!readJsonFileIfExists(LEGACY_CONFIG_PATH, json)) {
+      Serial.println("No saved schedule config found. Using defaults.");
+      return;
+    }
+    loadedFromLegacy = true;
+  }
+
+  int savedScheduleStartMinute = SCHEDULE_START_MINUTE;
+  int savedScheduleEndMinute = SCHEDULE_END_MINUTE;
+  bool savedScheduleEnabled = SCHEDULE_ENABLED;
+  String savedTimezoneTz = TIMEZONE_TZ;
 
   if (extractJsonString(json, "timezoneTz", savedTimezoneTz)) {
     if (!validateTimezoneTz(savedTimezoneTz)) {
@@ -1139,30 +1226,15 @@ void loadConfig() {
     savedScheduleEndMinute = SCHEDULE_END_MINUTE;
   }
 
-  applyWifiCredentials(savedWifiSsid, savedWifiPass);
   applyTimezoneSetting(savedTimezoneTz);
 
   if (hasScheduleEnabled || hasScheduleStart || hasScheduleEnd) {
     applyScheduleConfig(savedScheduleEnabled, savedScheduleStartMinute, savedScheduleEndMinute);
   }
 
-  Serial.print("Loaded servo window from LittleFS: ");
-  Serial.print(SERVO_MIN_DEG);
-  Serial.print(" to ");
-  Serial.println(SERVO_MAX_DEG);
-  Serial.print("Loaded step delays (ms): ");
-  Serial.print(LAZY_STEP_DELAY_MS);
-  Serial.print(", ");
-  Serial.print(PLAYFUL_STEP_DELAY_MS);
-  Serial.print(", ");
-  Serial.println(ZOOMIES_STEP_DELAY_MS);
-  Serial.print("Loaded rest window (minutes): ");
-  Serial.print(AUTO_REST_MIN_MINUTES);
-  Serial.print(" to ");
-  Serial.println(AUTO_REST_MAX_MINUTES);
-  Serial.print("Loaded Wi-Fi SSID: ");
-  Serial.println(hasSavedWifiCredentials ? WIFI_SSID : "(none)");
   Serial.print("Loaded timezone: ");
+  Serial.print(loadedFromLegacy ? LEGACY_CONFIG_PATH : SCHEDULE_CONFIG_PATH);
+  Serial.print(" -> ");
   Serial.println(TIMEZONE_TZ);
   Serial.print("Loaded schedule: ");
   Serial.print(SCHEDULE_ENABLED ? "enabled " : "disabled ");
@@ -1633,7 +1705,7 @@ void handleSet() {
   applyStepDelays(newLazyDelay, newPlayfulDelay, newZoomiesDelay);
   applyRestWindowMinutes(newRestMinMinutes, newRestMaxMinutes);
 
-  if (!saveConfig()) {
+  if (!saveMotionConfig()) {
     server.send(500, "text/plain",
                 "Updated settings for this boot, but failed to save to LittleFS.");
     return;
@@ -1710,8 +1782,11 @@ void handleNetworkSave() {
   applyTimezoneSetting(timezoneTz);
   applyScheduleConfig(scheduleEnabled, scheduleStartMinute, scheduleEndMinute);
 
-  if (!saveConfig()) {
-    server.send(500, "text/plain", "Updated Wi-Fi and schedule settings for this boot, but failed to save to LittleFS.");
+  bool wifiSaved = saveWifiConfig();
+  bool scheduleSaved = saveScheduleConfig();
+  if (!wifiSaved || !scheduleSaved) {
+    server.send(500, "text/plain",
+                "Updated Wi-Fi and schedule settings for this boot, but failed to save one or more LittleFS config files.");
     return;
   }
 
@@ -1744,7 +1819,7 @@ void handleNetworkSave() {
 void handleClearWifi() {
   applyWifiCredentials("", "");
 
-  if (!saveConfig()) {
+  if (!saveWifiConfig()) {
     server.send(500, "text/plain", "Cleared Wi-Fi for this boot, but failed to save to LittleFS.");
     return;
   }
@@ -1804,7 +1879,9 @@ void setup() {
   if (!littleFsReady) {
     Serial.println("LittleFS mount failed. Continuing with defaults only.");
   } else {
-    loadConfig();
+    loadMotionConfig();
+    loadWifiConfig();
+    loadScheduleConfig();
   }
 
   if (AUTO_CENTER_REST) {
