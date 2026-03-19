@@ -147,6 +147,7 @@ bool stationWasConnected = false;
 bool timeSyncRequested = false;
 bool timezoneApplied = false;
 bool timeValid = false;
+bool scheduleWindowWasOpen = false;
 wl_status_t lastLoggedStationStatus = WL_IDLE_STATUS;
 unsigned long lastStationStatusChangeMs = 0;
 
@@ -734,6 +735,16 @@ bool isMinuteWithinScheduleWindow(int currentMinute, int startMinute, int endMin
   return currentMinute >= startMinute || currentMinute < endMinute;
 }
 
+bool isScheduleWindowOpenNow() {
+  if (!SCHEDULE_ENABLED) return true;
+  if (!timeValid || !isTimeValid()) return false;
+
+  int currentMinute = currentLocalMinuteOfDay();
+  if (currentMinute < 0) return false;
+
+  return isMinuteWithinScheduleWindow(currentMinute, SCHEDULE_START_MINUTE, SCHEDULE_END_MINUTE);
+}
+
 void applyTimezoneIfNeeded() {
   if (timezoneApplied || TIMEZONE_TZ[0] == '\0') return;
 
@@ -753,6 +764,7 @@ void resetTimeState(const char* reason) {
   timeValid = false;
   timeSyncRequested = false;
   ntpSyncStartMs = 0;
+  scheduleWindowWasOpen = false;
 
   if (reason != nullptr) {
     Serial.print("Time state reset: ");
@@ -920,6 +932,13 @@ void serviceRuntimeState() {
   startNetworkBootIfConfigured();
   serviceStationConnection();
   serviceTimeState();
+
+  bool scheduleWindowOpenNow = isScheduleWindowOpenNow();
+  if (scheduleWindowOpenNow && !scheduleWindowWasOpen &&
+      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
+    nextAutoSessionMs = millis();
+  }
+  scheduleWindowWasOpen = scheduleWindowOpenNow;
 }
 
 void updateLed(PlayMode mode, unsigned long now) {
@@ -1313,7 +1332,7 @@ bool canAutoStartSessions() {
     return false;
   }
 
-  if (isMinuteWithinScheduleWindow(currentMinute, SCHEDULE_START_MINUTE, SCHEDULE_END_MINUTE)) {
+  if (isScheduleWindowOpenNow()) {
     logScheduleDecisionIfChanged(SCHEDULE_DECISION_IN_WINDOW);
     return true;
   }
@@ -1888,6 +1907,12 @@ void handleScheduleSave() {
     applyTimezoneIfNeeded();
   }
 
+  scheduleWindowWasOpen = isScheduleWindowOpenNow();
+  if (scheduleWindowWasOpen &&
+      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
+    nextAutoSessionMs = millis();
+  }
+
   canAutoStartSessions();
   Serial.println("Saved schedule settings updated.");
 
@@ -2017,6 +2042,7 @@ void setup() {
   settingsChanged = false;
   hasSavedWifiCredentials = configHasSavedWifiCredentials();
   lastScheduleDecisionReason = SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED;
+  scheduleWindowWasOpen = false;
   lastLoggedStationStatus = WiFi.status();
   lastStationStatusChangeMs = millis();
 
