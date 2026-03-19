@@ -32,6 +32,7 @@ const int SERVO_PIN  = D5;
 const int LED_PIN    = D4;
 const int MODE_A_PIN = D6;
 const int MODE_B_PIN = D7;
+const bool LED_FLASH = false;
 
 const size_t WIFI_SSID_MAX_LEN = 32;
 const size_t WIFI_PASS_MAX_LEN = 63;
@@ -879,6 +880,15 @@ void serviceRuntimeState() {
 }
 
 void updateLed(PlayMode mode, unsigned long now) {
+  if (!LED_FLASH) {
+    if (!ledState) {
+      ledState = true;
+      setLed(true);
+    }
+    lastLedToggleMs = now;
+    return;
+  }
+
   int interval = ledToggleIntervalMs(mode);
 
   if (now - lastLedToggleMs >= (unsigned long)interval) {
@@ -1893,8 +1903,8 @@ void setup() {
   wandServo.attach(SERVO_PIN);
   writeServoAngle(currentServoDeg);
 
-  ledState = false;
-  setLed(false);
+  ledState = !LED_FLASH;
+  setLed(!LED_FLASH);
   lastLedToggleMs = millis();
 
   startupEndMs = millis() + STARTUP_WARMUP_MS;
