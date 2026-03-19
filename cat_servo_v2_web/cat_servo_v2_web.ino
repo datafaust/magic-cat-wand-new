@@ -12,9 +12,9 @@
  * MODE_B_PIN  -> D7 (GPIO13)  - 3-pos switch pole B (common)
  *
  * Switch logic:
- *   LOW + LOW   = Beginner
- *   HIGH + HIGH = Intermediate
- *   mixed       = Advanced
+ *   LOW + LOW   = Lazy
+ *   HIGH + HIGH = Playful
+ *   mixed       = Zoomies
  */
 
 // ===== Wi-Fi access point =====
@@ -37,24 +37,24 @@ int SERVO_MAX_DEG  = 155;
 int SERVO_REST_DEG = 90;
 
 const bool AUTO_CENTER_REST = true;
-const int BEGINNER_STEP_DEG     = 2;
-const int INTERMEDIATE_STEP_DEG = 3;
-const int ADVANCED_STEP_DEG     = 4;
+const int LAZY_STEP_DEG    = 2;
+const int PLAYFUL_STEP_DEG = 3;
+const int ZOOMIES_STEP_DEG = 4;
 const int DART_EXTRA_STEP_DEG   = 2;
 
 // Smaller delay = faster motion
-int BEGINNER_STEP_DELAY_MS     = 10;
-int INTERMEDIATE_STEP_DELAY_MS = 6;
-int ADVANCED_STEP_DELAY_MS     = 4;
+int LAZY_STEP_DELAY_MS    = 10;
+int PLAYFUL_STEP_DELAY_MS = 6;
+int ZOOMIES_STEP_DELAY_MS = 4;
 
 const unsigned long STARTUP_WARMUP_MS = 5000UL;
 
 Servo wandServo;
 
 enum PlayMode {
-  MODE_BEGINNER,
-  MODE_INTERMEDIATE,
-  MODE_ADVANCED
+  MODE_LAZY,
+  MODE_PLAYFUL,
+  MODE_ZOOMIES
 };
 
 enum ControllerState {
@@ -157,16 +157,16 @@ PlayMode readModeSwitch() {
   int a = digitalRead(MODE_A_PIN);
   int b = digitalRead(MODE_B_PIN);
 
-  if (a == LOW && b == LOW)   return MODE_BEGINNER;
-  if (a == HIGH && b == HIGH) return MODE_INTERMEDIATE;
-  return MODE_ADVANCED;
+  if (a == LOW && b == LOW)   return MODE_LAZY;
+  if (a == HIGH && b == HIGH) return MODE_PLAYFUL;
+  return MODE_ZOOMIES;
 }
 
 const char* modeName(PlayMode mode) {
   switch (mode) {
-    case MODE_BEGINNER:     return "Beginner";
-    case MODE_INTERMEDIATE: return "Intermediate";
-    case MODE_ADVANCED:     return "Advanced";
+    case MODE_LAZY:     return "Lazy";
+    case MODE_PLAYFUL:  return "Playful";
+    case MODE_ZOOMIES:  return "Zoomies";
   }
   return "Unknown";
 }
@@ -182,45 +182,45 @@ const char* controllerStateName(ControllerState state) {
 
 int ledToggleIntervalMs(PlayMode mode) {
   switch (mode) {
-    case MODE_BEGINNER:     return 420;
-    case MODE_INTERMEDIATE: return 240;
-    case MODE_ADVANCED:     return 140;
+    case MODE_LAZY:     return 420;
+    case MODE_PLAYFUL:  return 240;
+    case MODE_ZOOMIES:  return 140;
   }
   return 240;
 }
 
 int stepDelayMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_BEGINNER:     return BEGINNER_STEP_DELAY_MS;
-    case MODE_INTERMEDIATE: return INTERMEDIATE_STEP_DELAY_MS;
-    case MODE_ADVANCED:     return ADVANCED_STEP_DELAY_MS;
+    case MODE_LAZY:     return LAZY_STEP_DELAY_MS;
+    case MODE_PLAYFUL:  return PLAYFUL_STEP_DELAY_MS;
+    case MODE_ZOOMIES:  return ZOOMIES_STEP_DELAY_MS;
   }
-  return INTERMEDIATE_STEP_DELAY_MS;
+  return PLAYFUL_STEP_DELAY_MS;
 }
 
 int stepDegForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_BEGINNER:     return BEGINNER_STEP_DEG;
-    case MODE_INTERMEDIATE: return INTERMEDIATE_STEP_DEG;
-    case MODE_ADVANCED:     return ADVANCED_STEP_DEG;
+    case MODE_LAZY:     return LAZY_STEP_DEG;
+    case MODE_PLAYFUL:  return PLAYFUL_STEP_DEG;
+    case MODE_ZOOMIES:  return ZOOMIES_STEP_DEG;
   }
-  return INTERMEDIATE_STEP_DEG;
+  return PLAYFUL_STEP_DEG;
 }
 
 unsigned long sessionDurationMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_BEGINNER:     return randRangeUL(20000UL, 35000UL);
-    case MODE_INTERMEDIATE: return randRangeUL(30000UL, 50000UL);
-    case MODE_ADVANCED:     return randRangeUL(40000UL, 65000UL);
+    case MODE_LAZY:     return randRangeUL(20000UL, 35000UL);
+    case MODE_PLAYFUL:  return randRangeUL(30000UL, 50000UL);
+    case MODE_ZOOMIES:  return randRangeUL(40000UL, 65000UL);
   }
   return 30000UL;
 }
 
 unsigned long restDurationMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_BEGINNER:     return randRangeUL(4UL * 60UL * 1000UL, 7UL * 60UL * 1000UL);
-    case MODE_INTERMEDIATE: return randRangeUL(2UL * 60UL * 1000UL + 30000UL, 5UL * 60UL * 1000UL);
-    case MODE_ADVANCED:     return randRangeUL(90UL * 1000UL, 4UL * 60UL * 1000UL);
+    case MODE_LAZY:     return randRangeUL(4UL * 60UL * 1000UL, 7UL * 60UL * 1000UL);
+    case MODE_PLAYFUL:  return randRangeUL(2UL * 60UL * 1000UL + 30000UL, 5UL * 60UL * 1000UL);
+    case MODE_ZOOMIES:  return randRangeUL(90UL * 1000UL, 4UL * 60UL * 1000UL);
   }
   return 3UL * 60UL * 1000UL;
 }
@@ -240,9 +240,9 @@ int teaseAmpForMode(PlayMode mode) {
   int hiPct = 0;
 
   switch (mode) {
-    case MODE_BEGINNER:     loPct = 5;  hiPct = 16; break;
-    case MODE_INTERMEDIATE: loPct = 10; hiPct = 28; break;
-    case MODE_ADVANCED:     loPct = 15; hiPct = 34; break;
+    case MODE_LAZY:     loPct = 5;  hiPct = 16; break;
+    case MODE_PLAYFUL:  loPct = 10; hiPct = 28; break;
+    case MODE_ZOOMIES:  loPct = 15; hiPct = 34; break;
   }
 
   int lo = max2(4, pctOf(maxAmp, loPct));
@@ -256,9 +256,9 @@ int dartAmpForMode(PlayMode mode) {
   int hiPct = 0;
 
   switch (mode) {
-    case MODE_BEGINNER:     loPct = 18; hiPct = 42; break;
-    case MODE_INTERMEDIATE: loPct = 35; hiPct = 70; break;
-    case MODE_ADVANCED:     loPct = 55; hiPct = 92; break;
+    case MODE_LAZY:     loPct = 18; hiPct = 42; break;
+    case MODE_PLAYFUL:  loPct = 35; hiPct = 70; break;
+    case MODE_ZOOMIES:  loPct = 55; hiPct = 92; break;
   }
 
   int lo = max2(10, pctOf(maxAmp, loPct));
@@ -388,7 +388,7 @@ bool moveToAngle(int targetDeg, int stepDelayMs, int stepDeg, PlayMode modeAtSta
 }
 
 bool moveToRest(PlayMode modeAtStart, int stepDelayMs) {
-  return moveToAngle(SERVO_REST_DEG, stepDelayMs, BEGINNER_STEP_DEG, modeAtStart);
+  return moveToAngle(SERVO_REST_DEG, stepDelayMs, LAZY_STEP_DEG, modeAtStart);
 }
 
 void applyServoWindow(int newMin, int newMax) {
@@ -403,10 +403,10 @@ void applyServoWindow(int newMin, int newMax) {
   settingsChanged = true;
 }
 
-void applyStepDelays(int beginnerMs, int intermediateMs, int advancedMs) {
-  BEGINNER_STEP_DELAY_MS = beginnerMs;
-  INTERMEDIATE_STEP_DELAY_MS = intermediateMs;
-  ADVANCED_STEP_DELAY_MS = advancedMs;
+void applyStepDelays(int lazyMs, int playfulMs, int zoomiesMs) {
+  LAZY_STEP_DELAY_MS = lazyMs;
+  PLAYFUL_STEP_DELAY_MS = playfulMs;
+  ZOOMIES_STEP_DELAY_MS = zoomiesMs;
   settingsChanged = true;
 }
 
@@ -423,12 +423,12 @@ bool saveConfig() {
   json += String(SERVO_MIN_DEG);
   json += ",\"servoMaxDeg\":";
   json += String(SERVO_MAX_DEG);
-  json += ",\"beginnerStepDelayMs\":";
-  json += String(BEGINNER_STEP_DELAY_MS);
-  json += ",\"intermediateStepDelayMs\":";
-  json += String(INTERMEDIATE_STEP_DELAY_MS);
-  json += ",\"advancedStepDelayMs\":";
-  json += String(ADVANCED_STEP_DELAY_MS);
+  json += ",\"lazyStepDelayMs\":";
+  json += String(LAZY_STEP_DELAY_MS);
+  json += ",\"playfulStepDelayMs\":";
+  json += String(PLAYFUL_STEP_DELAY_MS);
+  json += ",\"zoomiesStepDelayMs\":";
+  json += String(ZOOMIES_STEP_DELAY_MS);
   json += "}\n";
 
   size_t written = file.print(json);
@@ -461,9 +461,9 @@ void loadConfig() {
 
   int savedMin = 0;
   int savedMax = 0;
-  int savedBeginnerDelay = BEGINNER_STEP_DELAY_MS;
-  int savedIntermediateDelay = INTERMEDIATE_STEP_DELAY_MS;
-  int savedAdvancedDelay = ADVANCED_STEP_DELAY_MS;
+  int savedLazyDelay = LAZY_STEP_DELAY_MS;
+  int savedPlayfulDelay = PLAYFUL_STEP_DELAY_MS;
+  int savedZoomiesDelay = ZOOMIES_STEP_DELAY_MS;
 
   if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
       !extractJsonInt(json, "servoMaxDeg", savedMax)) {
@@ -478,16 +478,19 @@ void loadConfig() {
 
   applyServoWindow(savedMin, savedMax);
 
-  bool hasBeginnerDelay = extractJsonInt(json, "beginnerStepDelayMs", savedBeginnerDelay);
-  bool hasIntermediateDelay = extractJsonInt(json, "intermediateStepDelayMs", savedIntermediateDelay);
-  bool hasAdvancedDelay = extractJsonInt(json, "advancedStepDelayMs", savedAdvancedDelay);
+  bool hasLazyDelay = extractJsonInt(json, "lazyStepDelayMs", savedLazyDelay) ||
+                      extractJsonInt(json, "beginnerStepDelayMs", savedLazyDelay);
+  bool hasPlayfulDelay = extractJsonInt(json, "playfulStepDelayMs", savedPlayfulDelay) ||
+                         extractJsonInt(json, "intermediateStepDelayMs", savedPlayfulDelay);
+  bool hasZoomiesDelay = extractJsonInt(json, "zoomiesStepDelayMs", savedZoomiesDelay) ||
+                         extractJsonInt(json, "advancedStepDelayMs", savedZoomiesDelay);
 
-  if (hasBeginnerDelay && hasIntermediateDelay && hasAdvancedDelay &&
-      validateStepDelayMs(savedBeginnerDelay) &&
-      validateStepDelayMs(savedIntermediateDelay) &&
-      validateStepDelayMs(savedAdvancedDelay)) {
-    applyStepDelays(savedBeginnerDelay, savedIntermediateDelay, savedAdvancedDelay);
-  } else if (hasBeginnerDelay || hasIntermediateDelay || hasAdvancedDelay) {
+  if (hasLazyDelay && hasPlayfulDelay && hasZoomiesDelay &&
+      validateStepDelayMs(savedLazyDelay) &&
+      validateStepDelayMs(savedPlayfulDelay) &&
+      validateStepDelayMs(savedZoomiesDelay)) {
+    applyStepDelays(savedLazyDelay, savedPlayfulDelay, savedZoomiesDelay);
+  } else if (hasLazyDelay || hasPlayfulDelay || hasZoomiesDelay) {
     Serial.println("Saved speed settings invalid. Using default speed settings.");
   }
 
@@ -496,11 +499,11 @@ void loadConfig() {
   Serial.print(" to ");
   Serial.println(SERVO_MAX_DEG);
   Serial.print("Loaded step delays (ms): ");
-  Serial.print(BEGINNER_STEP_DELAY_MS);
+  Serial.print(LAZY_STEP_DELAY_MS);
   Serial.print(", ");
-  Serial.print(INTERMEDIATE_STEP_DELAY_MS);
+  Serial.print(PLAYFUL_STEP_DELAY_MS);
   Serial.print(", ");
-  Serial.println(ADVANCED_STEP_DELAY_MS);
+  Serial.println(ZOOMIES_STEP_DELAY_MS);
 }
 
 bool canAutoStartSessions() {
@@ -558,18 +561,18 @@ bool doBigDart(PlayMode modeAtStart) {
 
 bool hidePause(PlayMode modeAtStart) {
   switch (modeAtStart) {
-    case MODE_BEGINNER:     return delayResponsive((unsigned long)randRange(2500, 4500), modeAtStart);
-    case MODE_INTERMEDIATE: return delayResponsive((unsigned long)randRange(2200, 4000), modeAtStart);
-    case MODE_ADVANCED:     return delayResponsive((unsigned long)randRange(1800, 3200), modeAtStart);
+    case MODE_LAZY:     return delayResponsive((unsigned long)randRange(2500, 4500), modeAtStart);
+    case MODE_PLAYFUL:  return delayResponsive((unsigned long)randRange(2200, 4000), modeAtStart);
+    case MODE_ZOOMIES:  return delayResponsive((unsigned long)randRange(1800, 3200), modeAtStart);
   }
   return false;
 }
 
 bool shortPause(PlayMode modeAtStart) {
   switch (modeAtStart) {
-    case MODE_BEGINNER:     return delayResponsive((unsigned long)randRange(900, 2200), modeAtStart);
-    case MODE_INTERMEDIATE: return delayResponsive((unsigned long)randRange(600, 1800), modeAtStart);
-    case MODE_ADVANCED:     return delayResponsive((unsigned long)randRange(350, 1200), modeAtStart);
+    case MODE_LAZY:     return delayResponsive((unsigned long)randRange(900, 2200), modeAtStart);
+    case MODE_PLAYFUL:  return delayResponsive((unsigned long)randRange(600, 1800), modeAtStart);
+    case MODE_ZOOMIES:  return delayResponsive((unsigned long)randRange(350, 1200), modeAtStart);
   }
   return false;
 }
@@ -619,7 +622,7 @@ bool runTimedSession(PlayMode modeAtStart, unsigned long sessionMs, bool allowMi
     unsigned long burstEnd = millis() + burstLen;
     if (burstEnd > huntEnd) burstEnd = huntEnd;
 
-    int teasesUntilDart = randRange(2, (modeAtStart == MODE_ADVANCED) ? 4 : 5);
+    int teasesUntilDart = randRange(2, (modeAtStart == MODE_ZOOMIES) ? 4 : 5);
 
     while (millis() < burstEnd) {
       if (teasesUntilDart > 0) {
@@ -627,7 +630,7 @@ bool runTimedSession(PlayMode modeAtStart, unsigned long sessionMs, bool allowMi
         teasesUntilDart--;
       } else {
         if (doBigDart(modeAtStart)) return true;
-        teasesUntilDart = randRange(2, (modeAtStart == MODE_ADVANCED) ? 4 : 5);
+        teasesUntilDart = randRange(2, (modeAtStart == MODE_ZOOMIES) ? 4 : 5);
       }
     }
 
@@ -645,7 +648,7 @@ bool runTimedSession(PlayMode modeAtStart, unsigned long sessionMs, bool allowMi
   while (millis() < endMs) {
     if (doTease(modeAtStart)) return true;
     if (doTease(modeAtStart)) return true;
-    if (doBigDart((modeAtStart == MODE_BEGINNER) ? MODE_INTERMEDIATE : modeAtStart)) return true;
+    if (doBigDart((modeAtStart == MODE_LAZY) ? MODE_PLAYFUL : modeAtStart)) return true;
     if (moveToRest(modeAtStart, 9)) return true;
     if (delayResponsive((unsigned long)randRange(200, 450), modeAtStart)) return true;
   }
@@ -661,7 +664,7 @@ void finishSession(PlayMode modeAtEnd) {
     settingsChanged = false;
   }
 
-  moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, BEGINNER_STEP_DEG, modeAtEnd);
+  moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, LAZY_STEP_DEG, modeAtEnd);
 
   controllerState = STATE_RESTING;
   lastSessionEndMs = millis();
@@ -754,7 +757,7 @@ String htmlPage() {
 
   page += F("<div class='card hint'><strong>How to widen swings</strong>"
             "<p class='meta'>The toy swings inside the servo window set below. Lowering the minimum angle and/or raising the maximum angle gives the servo more room to travel. A wider gap usually means stronger-looking swings, as long as your hardware can move safely in that range.</p>"
-            "<p class='meta'>Beginner stays gentler. Intermediate and Advanced use more of the safe window and shorter rests.</p></div>");
+            "<p class='meta'>Lazy stays gentler. Playful and Zoomies use more of the safe window and shorter rests.</p></div>");
 
   page += F("<div class='card hint'><strong>How to change swing speed</strong>"
             "<p class='meta'>These speed settings control how many milliseconds the sketch waits between small servo steps. Lower numbers move faster. Higher numbers move slower and softer.</p>"
@@ -771,19 +774,19 @@ String htmlPage() {
   page += String(SERVO_MAX_DEG);
   page += F("'>");
 
-  page += F("<label for='beginnerDelay'>Beginner speed delay in ms</label>");
-  page += F("<input id='beginnerDelay' name='beginnerDelay' type='number' min='2' max='25' value='");
-  page += String(BEGINNER_STEP_DELAY_MS);
+  page += F("<label for='lazyDelay'>Lazy speed delay in ms</label>");
+  page += F("<input id='lazyDelay' name='lazyDelay' type='number' min='2' max='25' value='");
+  page += String(LAZY_STEP_DELAY_MS);
   page += F("'>");
 
-  page += F("<label for='intermediateDelay'>Intermediate speed delay in ms</label>");
-  page += F("<input id='intermediateDelay' name='intermediateDelay' type='number' min='2' max='25' value='");
-  page += String(INTERMEDIATE_STEP_DELAY_MS);
+  page += F("<label for='playfulDelay'>Playful speed delay in ms</label>");
+  page += F("<input id='playfulDelay' name='playfulDelay' type='number' min='2' max='25' value='");
+  page += String(PLAYFUL_STEP_DELAY_MS);
   page += F("'>");
 
-  page += F("<label for='advancedDelay'>Advanced speed delay in ms</label>");
-  page += F("<input id='advancedDelay' name='advancedDelay' type='number' min='2' max='25' value='");
-  page += String(ADVANCED_STEP_DELAY_MS);
+  page += F("<label for='zoomiesDelay'>Zoomies speed delay in ms</label>");
+  page += F("<input id='zoomiesDelay' name='zoomiesDelay' type='number' min='2' max='25' value='");
+  page += String(ZOOMIES_STEP_DELAY_MS);
   page += F("'>");
 
   page += F("<button type='submit'>Apply</button>");
@@ -806,19 +809,24 @@ void handleRoot() {
 }
 
 void handleSet() {
+  bool hasLazyArg = server.hasArg("lazyDelay") || server.hasArg("beginnerDelay");
+  bool hasPlayfulArg = server.hasArg("playfulDelay") || server.hasArg("intermediateDelay");
+  bool hasZoomiesArg = server.hasArg("zoomiesDelay") || server.hasArg("advancedDelay");
+
   if (!server.hasArg("min") || !server.hasArg("max") ||
-      !server.hasArg("beginnerDelay") ||
-      !server.hasArg("intermediateDelay") ||
-      !server.hasArg("advancedDelay")) {
+      !hasLazyArg || !hasPlayfulArg || !hasZoomiesArg) {
     server.send(400, "text/plain", "Missing one or more required parameters.");
     return;
   }
 
   int newMin = server.arg("min").toInt();
   int newMax = server.arg("max").toInt();
-  int newBeginnerDelay = server.arg("beginnerDelay").toInt();
-  int newIntermediateDelay = server.arg("intermediateDelay").toInt();
-  int newAdvancedDelay = server.arg("advancedDelay").toInt();
+  int newLazyDelay = server.hasArg("lazyDelay") ? server.arg("lazyDelay").toInt()
+                                                : server.arg("beginnerDelay").toInt();
+  int newPlayfulDelay = server.hasArg("playfulDelay") ? server.arg("playfulDelay").toInt()
+                                                      : server.arg("intermediateDelay").toInt();
+  int newZoomiesDelay = server.hasArg("zoomiesDelay") ? server.arg("zoomiesDelay").toInt()
+                                                      : server.arg("advancedDelay").toInt();
 
   if (!validateServoWindow(newMin, newMax)) {
     server.send(400, "text/plain",
@@ -826,15 +834,15 @@ void handleSet() {
     return;
   }
 
-  if (!validateStepDelayMs(newBeginnerDelay) ||
-      !validateStepDelayMs(newIntermediateDelay) ||
-      !validateStepDelayMs(newAdvancedDelay)) {
+  if (!validateStepDelayMs(newLazyDelay) ||
+      !validateStepDelayMs(newPlayfulDelay) ||
+      !validateStepDelayMs(newZoomiesDelay)) {
     server.send(400, "text/plain", "Each speed delay must be between 2 and 25 ms.");
     return;
   }
 
   applyServoWindow(newMin, newMax);
-  applyStepDelays(newBeginnerDelay, newIntermediateDelay, newAdvancedDelay);
+  applyStepDelays(newLazyDelay, newPlayfulDelay, newZoomiesDelay);
 
   if (!saveConfig()) {
     server.send(500, "text/plain",
@@ -847,11 +855,11 @@ void handleSet() {
   Serial.print(" to ");
   Serial.println(SERVO_MAX_DEG);
   Serial.print("Updated step delays (ms): ");
-  Serial.print(BEGINNER_STEP_DELAY_MS);
+  Serial.print(LAZY_STEP_DELAY_MS);
   Serial.print(", ");
-  Serial.print(INTERMEDIATE_STEP_DELAY_MS);
+  Serial.print(PLAYFUL_STEP_DELAY_MS);
   Serial.print(", ");
-  Serial.println(ADVANCED_STEP_DELAY_MS);
+  Serial.println(ZOOMIES_STEP_DELAY_MS);
 
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
@@ -956,12 +964,12 @@ void loop() {
   }
 
   if (parkRequested && controllerState != STATE_SESSION) {
-    moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, BEGINNER_STEP_DEG, mode);
+    moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, LAZY_STEP_DEG, mode);
     parkRequested = false;
   }
 
   if (controllerState != STATE_SESSION && currentServoDeg != SERVO_REST_DEG) {
-    moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, BEGINNER_STEP_DEG, mode);
+    moveServoSmoothPark(currentServoDeg, SERVO_REST_DEG, 12, LAZY_STEP_DEG, mode);
   }
 
   bool shouldStart = false;
