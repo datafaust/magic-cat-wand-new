@@ -1,6 +1,7 @@
 #include <Servo.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <LittleFS.h>
 
 /*
  * ===== Pin assignments (D1 Mini) =====
@@ -27,6 +28,8 @@ const int SERVO_PIN  = D5;
 const int LED_PIN    = D4;
 const int MODE_A_PIN = D6;
 const int MODE_B_PIN = D7;
+
+const char* CONFIG_PATH = "/config.json";
 
 // ===== Servo safeguards =====
 int SERVO_MIN_DEG  = 25;
@@ -57,6 +60,7 @@ unsigned long lastLedToggleMs = 0;
 
 // ===== Runtime flags =====
 bool settingsChanged = false;
+bool littleFsReady = false;
 
 // ===== Helpers =====
 int clampAngle(int angle) {
@@ -67,6 +71,42 @@ int clampAngle(int angle) {
 
 int min2(int a, int b) { return (a < b) ? a : b; }
 int max2(int a, int b) { return (a > b) ? a : b; }
+
+bool validateServoWindow(int newMin, int newMax) {
+  if (newMin < 0 || newMin > 170) return false;
+  if (newMax < 10 || newMax > 180) return false;
+  if (newMax <= newMin) return false;
+  if ((newMax - newMin) < 20) return false;
+  return true;
+}
+
+bool extractJsonInt(const String& json, const char* key, int& valueOut) {
+  String quotedKey = String("\"") + key + "\"";
+  int keyPos = json.indexOf(quotedKey);
+  if (keyPos < 0) return false;
+
+  int colonPos = json.indexOf(':', keyPos + quotedKey.length());
+  if (colonPos < 0) return false;
+
+  int valueStart = colonPos + 1;
+  while (valueStart < json.length() && isspace(json[valueStart])) {
+    valueStart++;
+  }
+
+  int valueEnd = valueStart;
+  if (valueEnd < json.length() && json[valueEnd] == '-') {
+    valueEnd++;
+  }
+
+  while (valueEnd < json.length() && isdigit(json[valueEnd])) {
+    valueEnd++;
+  }
+
+  if (valueEnd == valueStart) return false;
+
+  valueOut = json.substring(valueStart, valueEnd).toInt();
+  return true;
+}
 
 int maxSafeAmplitude() {
   int leftRoom  = SERVO_REST_DEG - SERVO_MIN_DEG;
@@ -213,8 +253,75 @@ void applyServoWindow(int newMin, int newMax) {
   }
 
   currentServoDeg = clampAngle(currentServoDeg);
-  wandServo.write(currentServoDeg);
+  if (wandServo.attached()) {
+    wandServo.write(currentServoDeg);
+  }
   settingsChanged = true;
+}
+
+bool saveConfig() {
+  if (!littleFsReady) return false;
+
+  File file = LittleFS.open(CONFIG_PATH, "w");
+  if (!file) {
+    Serial.println("Failed to open config file for write.");
+    return false;
+  }
+
+  String json = "{\"servoMinDeg\":";
+  json += String(SERVO_MIN_DEG);
+  json += ",\"servoMaxDeg\":";
+  json += String(SERVO_MAX_DEG);
+  json += "}\n";
+
+  size_t written = file.print(json);
+  file.close();
+
+  if (written != json.length()) {
+    Serial.println("Failed to write full config file.");
+    return false;
+  }
+
+  return true;
+}
+
+void loadConfig() {
+  if (!littleFsReady) return;
+
+  if (!LittleFS.exists(CONFIG_PATH)) {
+    Serial.println("No saved config found. Using defaults.");
+    return;
+  }
+
+  File file = LittleFS.open(CONFIG_PATH, "r");
+  if (!file) {
+    Serial.println("Failed to open config file for read. Using defaults.");
+    return;
+  }
+
+  String json = file.readString();
+  file.close();
+
+  int savedMin = 0;
+  int savedMax = 0;
+
+  if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
+      !extractJsonInt(json, "servoMaxDeg", savedMax)) {
+    Serial.println("Config file missing required fields. Using defaults.");
+    return;
+  }
+
+  if (!validateServoWindow(savedMin, savedMax)) {
+    Serial.println("Saved servo window is invalid. Using defaults.");
+    return;
+  }
+
+  applyServoWindow(savedMin, savedMax);
+
+  Serial.print("Loaded servo window from LittleFS: ");
+  Serial.print(SERVO_MIN_DEG);
+  Serial.print(" to ");
+  Serial.println(SERVO_MAX_DEG);
 }
 
 // ===== Web UI =====
@@ -264,7 +371,7 @@ String htmlPage() {
   page += F("<button type='submit'>Apply</button>");
   page += F("</form>");
   page += F("<p class='meta'>For safety this sketch requires max &gt; min and at least 20 degrees of spread. "
-            "When you apply a new window, REST is re-centered automatically.</p>");
+            "When you apply a new window, REST is re-centered automatically and saved to LittleFS for the next boot.</p>");
   page += F("</div>");
 
   page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
@@ -310,6 +417,12 @@ void handleSet() {
   }
 
   applyServoWindow(newMin, newMax);
+
+  if (!saveConfig()) {
+    server.send(500, "text/plain",
+                "Updated servo window for this boot, but failed to save to LittleFS.");
+    return;
+  }
 
   Serial.print("Updated servo window: ");
   Serial.print(SERVO_MIN_DEG);
@@ -375,6 +488,13 @@ void setup() {
   pinMode(MODE_A_PIN, INPUT_PULLUP);
   pinMode(MODE_B_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
+
+  littleFsReady = LittleFS.begin();
+  if (!littleFsReady) {
+    Serial.println("LittleFS mount failed. Continuing with defaults only.");
+  } else {
+    loadConfig();
+  }
 
   if (AUTO_CENTER_REST) {
     SERVO_REST_DEG = (SERVO_MIN_DEG + SERVO_MAX_DEG) / 2;
