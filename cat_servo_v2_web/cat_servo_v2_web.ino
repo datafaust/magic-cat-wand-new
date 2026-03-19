@@ -48,6 +48,7 @@ int PLAYFUL_STEP_DELAY_MS = 6;
 int ZOOMIES_STEP_DELAY_MS = 4;
 
 const unsigned long STARTUP_WARMUP_MS = 5000UL;
+const unsigned long MODE_SWITCH_RESTART_DELAY_MS = 1500UL;
 
 Servo wandServo;
 
@@ -75,6 +76,7 @@ bool settingsChanged = false;
 bool littleFsReady = false;
 bool forceSessionRequested = false;
 bool parkRequested = false;
+bool modeSwitchRestartPending = false;
 
 // ===== Runtime timing =====
 unsigned long startupEndMs = 0;
@@ -294,7 +296,10 @@ bool shouldInterruptSession(PlayMode modeAtStart) {
   if (parkRequested) return true;
 
   PlayMode currentMode = readModeSwitch();
-  if (currentMode != modeAtStart) return true;
+  if (currentMode != modeAtStart) {
+    modeSwitchRestartPending = true;
+    return true;
+  }
 
   if (settingsChanged) return true;
 
@@ -669,11 +674,21 @@ void finishSession(PlayMode modeAtEnd) {
   controllerState = STATE_RESTING;
   lastSessionEndMs = millis();
   sessionCounter++;
-  nextAutoSessionMs = lastSessionEndMs + restDurationMsForMode(modeAtEnd);
 
-  Serial.print("Session complete. Next auto session in ");
-  Serial.print((nextAutoSessionMs - lastSessionEndMs) / 1000UL);
-  Serial.println(" s");
+  if (modeSwitchRestartPending) {
+    nextAutoSessionMs = lastSessionEndMs + MODE_SWITCH_RESTART_DELAY_MS;
+    modeSwitchRestartPending = false;
+
+    Serial.print("Mode switch detected. Restarting in ");
+    Serial.print((nextAutoSessionMs - lastSessionEndMs) / 1000.0);
+    Serial.println(" s");
+  } else {
+    nextAutoSessionMs = lastSessionEndMs + restDurationMsForMode(modeAtEnd);
+
+    Serial.print("Session complete. Next auto session in ");
+    Serial.print((nextAutoSessionMs - lastSessionEndMs) / 1000UL);
+    Serial.println(" s");
+  }
 }
 
 void runSessionForMode(PlayMode modeAtStart) {
