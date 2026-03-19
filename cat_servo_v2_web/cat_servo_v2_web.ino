@@ -767,8 +767,8 @@ void resetTimeState(const char* reason) {
 void beginTimeSync() {
   if (timeSyncRequested || WiFi.status() != WL_CONNECTED) return;
 
-  applyTimezoneIfNeeded();
-  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
+  configTime(TIMEZONE_TZ, NTP_SERVER_1, NTP_SERVER_2);
+  timezoneApplied = true;
   timeSyncRequested = true;
   ntpSyncStartMs = millis();
   timeValid = false;
