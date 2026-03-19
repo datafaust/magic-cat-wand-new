@@ -131,6 +131,8 @@ bool stationWasConnected = false;
 bool timeSyncRequested = false;
 bool timezoneApplied = false;
 bool timeValid = false;
+wl_status_t lastLoggedStationStatus = WL_IDLE_STATUS;
+unsigned long lastStationStatusChangeMs = 0;
 
 // ===== Runtime timing =====
 unsigned long startupEndMs = 0;
@@ -390,6 +392,20 @@ const char* scheduleDecisionReasonName(ScheduleDecisionReason reason) {
   return "Unknown";
 }
 
+const char* stationStatusName(wl_status_t status) {
+  switch (status) {
+    case WL_IDLE_STATUS: return "Idle";
+    case WL_NO_SSID_AVAIL: return "SSID not found";
+    case WL_SCAN_COMPLETED: return "Scan completed";
+    case WL_CONNECTED: return "Connected";
+    case WL_CONNECT_FAILED: return "Connect failed";
+    case WL_CONNECTION_LOST: return "Connection lost";
+    case WL_DISCONNECTED: return "Disconnected";
+    case WL_WRONG_PASSWORD: return "Wrong password";
+    default: return "Unknown";
+  }
+}
+
 int ledToggleIntervalMs(PlayMode mode) {
   switch (mode) {
     case MODE_LAZY: return 420;
@@ -491,6 +507,48 @@ String timeStatusText() {
   if (WiFi.status() == WL_CONNECTED && timeSyncRequested) return "Waiting for NTP time";
   if (WiFi.status() == WL_CONNECTED) return "Wi-Fi connected, time sync not started";
   return "Waiting for Wi-Fi before time sync";
+}
+
+String wifiDiagnosticsHtml(unsigned long now) {
+  String html;
+  html.reserve(640);
+
+  wl_status_t status = WiFi.status();
+  html += F("<div><strong>Saved SSID:</strong> ");
+  html += (WIFI_SSID[0] != '\0') ? htmlEscape(WIFI_SSID) : String("(none)");
+  html += F("</div><div><strong>STA status:</strong> ");
+  html += stationStatusName(status);
+  html += F("</div><div><strong>Last STA status change:</strong> ");
+  html += String((now - lastStationStatusChangeMs) / 1000UL);
+  html += F(" s ago</div>");
+
+  if (stationConnectAttemptActive) {
+    html += F("<div><strong>Current connect attempt:</strong> ");
+    html += String((now - wifiConnectAttemptStartMs) / 1000UL);
+    html += F(" s elapsed</div>");
+  } else if (hasSavedWifiCredentials && !wifiSetupModeForced && networkBootStarted && status != WL_CONNECTED) {
+    unsigned long retryMs = 0;
+    if (lastWifiConnectAttemptMs > 0) {
+      unsigned long elapsed = now - lastWifiConnectAttemptMs;
+      retryMs = (elapsed >= WIFI_RETRY_INTERVAL_MS) ? 0 : (WIFI_RETRY_INTERVAL_MS - elapsed);
+    }
+
+    html += F("<div><strong>Next reconnect attempt:</strong> ");
+    html += String(retryMs / 1000UL);
+    html += F(" s</div>");
+  }
+
+  if (status == WL_CONNECTED) {
+    html += F("<div><strong>STA IP:</strong> ");
+    html += WiFi.localIP().toString();
+    html += F("</div>");
+  }
+
+  html += F("<div><strong>NTP sync requested:</strong> ");
+  html += timeSyncRequested ? "yes" : "no";
+  html += F("</div>");
+
+  return html;
 }
 
 String formatMinuteOfDay(int minuteOfDay) {
@@ -656,6 +714,13 @@ void startNetworkBootIfConfigured() {
 
 void serviceStationConnection() {
   wl_status_t status = WiFi.status();
+
+  if (status != lastLoggedStationStatus) {
+    lastLoggedStationStatus = status;
+    lastStationStatusChangeMs = millis();
+    Serial.print("Station status changed: ");
+    Serial.println(stationStatusName(status));
+  }
 
   if (status == WL_CONNECTED) {
     if (!stationWasConnected) {
@@ -1380,6 +1445,7 @@ String htmlPage() {
     page += F(" (overnight)");
   }
   page += F("</div>");
+  page += wifiDiagnosticsHtml(now);
 
   if (controllerState == STATE_STARTUP) {
     unsigned long warmupRemainingMs = (startupEndMs > now) ? (startupEndMs - now) : 0;
@@ -1747,6 +1813,8 @@ void setup() {
   settingsChanged = false;
   hasSavedWifiCredentials = configHasSavedWifiCredentials();
   lastScheduleDecisionReason = SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED;
+  lastLoggedStationStatus = WiFi.status();
+  lastStationStatusChangeMs = millis();
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
