@@ -148,6 +148,7 @@ bool timeSyncRequested = false;
 bool timezoneApplied = false;
 bool timeValid = false;
 bool scheduleWindowWasOpen = false;
+bool scheduleStartPending = false;
 wl_status_t lastLoggedStationStatus = WL_IDLE_STATUS;
 unsigned long lastStationStatusChangeMs = 0;
 
@@ -765,6 +766,7 @@ void resetTimeState(const char* reason) {
   timeSyncRequested = false;
   ntpSyncStartMs = 0;
   scheduleWindowWasOpen = false;
+  scheduleStartPending = false;
 
   if (reason != nullptr) {
     Serial.print("Time state reset: ");
@@ -934,11 +936,24 @@ void serviceRuntimeState() {
   serviceTimeState();
 
   bool scheduleWindowOpenNow = isScheduleWindowOpenNow();
-  if (scheduleWindowOpenNow && !scheduleWindowWasOpen &&
-      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
-    nextAutoSessionMs = millis();
+  if (scheduleWindowOpenNow && !scheduleWindowWasOpen) {
+    if (controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
+      nextAutoSessionMs = millis();
+    } else {
+      scheduleStartPending = true;
+    }
   }
   scheduleWindowWasOpen = scheduleWindowOpenNow;
+
+  if (scheduleStartPending && controllerState == STATE_RESTING &&
+      !forceSessionRequested && !parkRequested && scheduleWindowOpenNow) {
+    nextAutoSessionMs = millis();
+    scheduleStartPending = false;
+  }
+
+  if (!scheduleWindowOpenNow) {
+    scheduleStartPending = false;
+  }
 }
 
 void updateLed(PlayMode mode, unsigned long now) {
@@ -1911,6 +1926,9 @@ void handleScheduleSave() {
   if (scheduleWindowWasOpen &&
       controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
     nextAutoSessionMs = millis();
+    scheduleStartPending = false;
+  } else {
+    scheduleStartPending = scheduleWindowWasOpen;
   }
 
   canAutoStartSessions();
@@ -2043,6 +2061,7 @@ void setup() {
   hasSavedWifiCredentials = configHasSavedWifiCredentials();
   lastScheduleDecisionReason = SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED;
   scheduleWindowWasOpen = false;
+  scheduleStartPending = false;
   lastLoggedStationStatus = WiFi.status();
   lastStationStatusChangeMs = millis();
 
