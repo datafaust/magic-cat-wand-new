@@ -509,6 +509,18 @@ String timeStatusText() {
   return "Waiting for Wi-Fi before time sync";
 }
 
+String localTimeDisplayText() {
+  if (!timeValid || !isTimeValid()) return "Not available yet";
+
+  time_t now = time(nullptr);
+  struct tm localTime;
+  if (localtime_r(&now, &localTime) == nullptr) return "Not available yet";
+
+  char buf[40];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &localTime);
+  return String(buf);
+}
+
 String wifiDiagnosticsHtml(unsigned long now) {
   String html;
   html.reserve(640);
@@ -1431,6 +1443,8 @@ String htmlPage() {
   page += wifiStatusText();
   page += F("</div><div><strong>Time state:</strong> ");
   page += timeStatusText();
+  page += F("</div><div><strong>Local time:</strong> ");
+  page += localTimeDisplayText();
   page += F("</div><div><strong>Timezone:</strong> ");
   page += timezoneLabelForTz(TIMEZONE_TZ);
   page += F("</div><div><strong>Schedule:</strong> ");
