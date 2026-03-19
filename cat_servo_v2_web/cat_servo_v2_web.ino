@@ -50,12 +50,24 @@ const unsigned long BOOT_GESTURE_STABLE_MS = 250UL;
 const char* NTP_SERVER_1 = "pool.ntp.org";
 const char* NTP_SERVER_2 = "time.nist.gov";
 
+const int DEFAULT_SERVO_MIN_DEG = 25;
+const int DEFAULT_SERVO_MAX_DEG = 155;
+const int DEFAULT_LAZY_STEP_DELAY_MS = 10;
+const int DEFAULT_PLAYFUL_STEP_DELAY_MS = 6;
+const int DEFAULT_ZOOMIES_STEP_DELAY_MS = 4;
+const int DEFAULT_AUTO_REST_MIN_MINUTES = 2;
+const int DEFAULT_AUTO_REST_MAX_MINUTES = 5;
+const bool DEFAULT_SCHEDULE_ENABLED = false;
+const int DEFAULT_SCHEDULE_START_MINUTE = 9 * 60;
+const int DEFAULT_SCHEDULE_END_MINUTE = 17 * 60;
+const char* DEFAULT_TIMEZONE_TZ = "EST5EDT,M3.2.0/2,M11.1.0/2";
+
 ESP8266WebServer server(80);
 Servo wandServo;
 
 // ===== Servo safeguards =====
-int SERVO_MIN_DEG  = 25;
-int SERVO_MAX_DEG  = 155;
+int SERVO_MIN_DEG  = DEFAULT_SERVO_MIN_DEG;
+int SERVO_MAX_DEG  = DEFAULT_SERVO_MAX_DEG;
 int SERVO_REST_DEG = 90;
 
 const bool AUTO_CENTER_REST = true;
@@ -65,18 +77,18 @@ const int ZOOMIES_STEP_DEG = 4;
 const int DART_EXTRA_STEP_DEG = 2;
 
 // Smaller delay = faster motion
-int LAZY_STEP_DELAY_MS    = 10;
-int PLAYFUL_STEP_DELAY_MS = 6;
-int ZOOMIES_STEP_DELAY_MS = 4;
-int AUTO_REST_MIN_MINUTES = 2;
-int AUTO_REST_MAX_MINUTES = 5;
+int LAZY_STEP_DELAY_MS    = DEFAULT_LAZY_STEP_DELAY_MS;
+int PLAYFUL_STEP_DELAY_MS = DEFAULT_PLAYFUL_STEP_DELAY_MS;
+int ZOOMIES_STEP_DELAY_MS = DEFAULT_ZOOMIES_STEP_DELAY_MS;
+int AUTO_REST_MIN_MINUTES = DEFAULT_AUTO_REST_MIN_MINUTES;
+int AUTO_REST_MAX_MINUTES = DEFAULT_AUTO_REST_MAX_MINUTES;
 
 char WIFI_SSID[WIFI_SSID_MAX_LEN + 1] = "";
 char WIFI_PASS[WIFI_PASS_MAX_LEN + 1] = "";
 char TIMEZONE_TZ[TIMEZONE_MAX_LEN + 1] = "EST5EDT,M3.2.0/2,M11.1.0/2";
-bool SCHEDULE_ENABLED = false;
-int SCHEDULE_START_MINUTE = 9 * 60;
-int SCHEDULE_END_MINUTE = 17 * 60;
+bool SCHEDULE_ENABLED = DEFAULT_SCHEDULE_ENABLED;
+int SCHEDULE_START_MINUTE = DEFAULT_SCHEDULE_START_MINUTE;
+int SCHEDULE_END_MINUTE = DEFAULT_SCHEDULE_END_MINUTE;
 
 enum PlayMode {
   MODE_LAZY,
@@ -387,6 +399,16 @@ bool writeJsonFile(const char* path, const String& json) {
   return true;
 }
 
+bool deleteFileIfExists(const char* path) {
+  if (!littleFsReady || !LittleFS.exists(path)) return true;
+
+  if (LittleFS.remove(path)) return true;
+
+  Serial.print("Failed to remove ");
+  Serial.println(path);
+  return false;
+}
+
 int maxSafeAmplitude() {
   int leftRoom = SERVO_REST_DEG - SERVO_MIN_DEG;
   int rightRoom = SERVO_MAX_DEG - SERVO_REST_DEG;
@@ -657,6 +679,24 @@ void applyScheduleConfig(bool enabled, int startMinute, int endMinute) {
   SCHEDULE_ENABLED = enabled;
   SCHEDULE_START_MINUTE = startMinute;
   SCHEDULE_END_MINUTE = endMinute;
+}
+
+void applyDefaultConfig() {
+  applyServoWindow(DEFAULT_SERVO_MIN_DEG, DEFAULT_SERVO_MAX_DEG);
+  applyStepDelays(DEFAULT_LAZY_STEP_DELAY_MS, DEFAULT_PLAYFUL_STEP_DELAY_MS, DEFAULT_ZOOMIES_STEP_DELAY_MS);
+  applyRestWindowMinutes(DEFAULT_AUTO_REST_MIN_MINUTES, DEFAULT_AUTO_REST_MAX_MINUTES);
+  applyWifiCredentials("", "");
+  applyTimezoneSetting(DEFAULT_TIMEZONE_TZ);
+  applyScheduleConfig(DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_START_MINUTE, DEFAULT_SCHEDULE_END_MINUTE);
+}
+
+bool clearAllSavedConfig() {
+  bool ok = true;
+  ok = deleteFileIfExists(MOTION_CONFIG_PATH) && ok;
+  ok = deleteFileIfExists(WIFI_CONFIG_PATH) && ok;
+  ok = deleteFileIfExists(SCHEDULE_CONFIG_PATH) && ok;
+  ok = deleteFileIfExists(LEGACY_CONFIG_PATH) && ok;
+  return ok;
 }
 
 void setLed(bool on) {
@@ -1661,6 +1701,13 @@ String htmlPage() {
   page += F("<p class='meta'>If start and end times match, the schedule is treated as all day. Overnight windows are supported.</p>");
   page += F("</div>");
 
+  page += F("<div class='card'><strong>Maintenance</strong>");
+  page += F("<form action='/clear-data' method='post' onsubmit=\"return confirm('Clear all saved settings and return to defaults?');\">");
+  page += F("<button class='danger' type='submit'>Clear All Saved Data</button>");
+  page += F("</form>");
+  page += F("<p class='meta'>This deletes all saved motion, Wi-Fi, and schedule data from LittleFS, including the legacy config file, and resets this boot to default settings.</p>");
+  page += F("</div>");
+
   page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
   page += AP_SSID;
   page += F("</strong> and browse to <strong>http://192.168.4.1</strong>. The local AP stays available even when station Wi-Fi is configured.</div>");
@@ -1874,6 +1921,40 @@ void handleClearWifi() {
   server.send(303, "text/plain", "");
 }
 
+void handleClearData() {
+  if (!littleFsReady) {
+    server.send(500, "text/plain", "LittleFS is not available, so saved data cannot be cleared safely.");
+    return;
+  }
+
+  applyDefaultConfig();
+
+  if (!clearAllSavedConfig()) {
+    server.send(500, "text/plain", "Failed to remove one or more saved config files from LittleFS.");
+    return;
+  }
+
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP);
+  bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
+
+  wifiSetupModeForced = false;
+  bootGestureWindowClosed = true;
+  networkBootStarted = true;
+  stationConnectAttemptActive = false;
+  stationWasConnected = false;
+  forceSessionRequested = false;
+  parkRequested = false;
+  resetTimeState("All LittleFS config cleared");
+  logScheduleDecisionIfChanged(SCHEDULE_DECISION_DISABLED);
+
+  Serial.print("All saved config cleared. AP status: ");
+  Serial.println(apOk ? "READY" : "FAILED");
+
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
+}
+
 void handleStart() {
   forceSessionRequested = true;
   parkRequested = false;
@@ -1960,6 +2041,7 @@ void setup() {
   server.on("/wifi", HTTP_POST, handleWifiSave);
   server.on("/schedule", HTTP_POST, handleScheduleSave);
   server.on("/clear-wifi", HTTP_POST, handleClearWifi);
+  server.on("/clear-data", HTTP_POST, handleClearData);
   server.on("/start", HTTP_POST, handleStart);
   server.on("/park", HTTP_POST, handlePark);
   server.onNotFound(handleNotFound);
