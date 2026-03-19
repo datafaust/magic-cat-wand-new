@@ -37,12 +37,14 @@ int SERVO_MAX_DEG  = 155;
 int SERVO_REST_DEG = 90;
 
 const bool AUTO_CENTER_REST = true;
-const int SERVO_STEP_DEG    = 2;
+const int BEGINNER_STEP_DEG     = 2;
+const int INTERMEDIATE_STEP_DEG = 3;
+const int ADVANCED_STEP_DEG     = 4;
 
 // Smaller delay = faster motion
 const int BEGINNER_STEP_DELAY_MS     = 10;
-const int INTERMEDIATE_STEP_DELAY_MS = 8;
-const int ADVANCED_STEP_DELAY_MS     = 6;
+const int INTERMEDIATE_STEP_DELAY_MS = 6;
+const int ADVANCED_STEP_DELAY_MS     = 4;
 
 Servo wandServo;
 
@@ -151,6 +153,15 @@ int stepDelayMsForMode(PlayMode mode) {
   return INTERMEDIATE_STEP_DELAY_MS;
 }
 
+int stepDegForMode(PlayMode mode) {
+  switch (mode) {
+    case MODE_BEGINNER:     return BEGINNER_STEP_DEG;
+    case MODE_INTERMEDIATE: return INTERMEDIATE_STEP_DEG;
+    case MODE_ADVANCED:     return ADVANCED_STEP_DEG;
+  }
+  return INTERMEDIATE_STEP_DEG;
+}
+
 void setLed(bool on) {
   // External LED from D4 -> resistor -> GND
   digitalWrite(LED_PIN, on ? HIGH : LOW);
@@ -217,7 +228,7 @@ void moveServoSmooth(int fromDeg, int toDeg, int stepDelayMs, int stepDeg, PlayM
 
 void moveToAngle(int targetDeg, int stepDelayMs, PlayMode mode) {
   targetDeg = clampAngle(targetDeg);
-  moveServoSmooth(currentServoDeg, targetDeg, stepDelayMs, SERVO_STEP_DEG, mode);
+  moveServoSmooth(currentServoDeg, targetDeg, stepDelayMs, stepDegForMode(mode), mode);
   currentServoDeg = targetDeg;
 }
 
@@ -257,6 +268,28 @@ void applyServoWindow(int newMin, int newMax) {
     wandServo.write(currentServoDeg);
   }
   settingsChanged = true;
+}
+
+int randomSignedMagnitudeTenths(int minMagnitude10, int maxMagnitude10) {
+  int magnitude = random(minMagnitude10, maxMagnitude10 + 1);
+  return random(0, 2) == 0 ? -magnitude : magnitude;
+}
+
+int randomServoValueTenthsForMode(PlayMode mode) {
+  switch (mode) {
+    case MODE_BEGINNER:
+      return random(-6, 7);  // preserve gentler beginner motion
+
+    case MODE_INTERMEDIATE:
+      // Bias away from center so the swing reads clearly without going frantic.
+      return randomSignedMagnitudeTenths(4, 10);
+
+    case MODE_ADVANCED:
+      // Keep advanced near the outer portion of the safe range.
+      return randomSignedMagnitudeTenths(6, 10);
+  }
+
+  return random(-10, 11);
 }
 
 bool saveConfig() {
@@ -337,6 +370,7 @@ String htmlPage() {
     "<style>"
     "body{font-family:Arial,sans-serif;max-width:680px;margin:24px auto;padding:0 16px;line-height:1.45;}"
     ".card{border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:16px;}"
+    ".hint{background:#f7f7f7;border-left:4px solid #4f6d4a;}"
     "label{display:block;margin-top:12px;font-weight:600;}"
     "input[type=number]{width:100%;padding:10px;font-size:16px;box-sizing:border-box;}"
     "button{margin-top:16px;padding:12px 16px;font-size:16px;border-radius:10px;border:0;cursor:pointer;}"
@@ -355,15 +389,21 @@ String htmlPage() {
   page += String(SERVO_MAX_DEG);
   page += F("&deg;</div><div><strong>Current rest:</strong> ");
   page += String(SERVO_REST_DEG);
-  page += F("&deg;</div></div>");
+  page += F("&deg;</div><div><strong>Current swing from rest:</strong> up to ");
+  page += String(maxSafeAmplitude());
+  page += F("&deg; each side</div></div>");
+
+  page += F("<div class='card hint'><strong>How to widen swings</strong>"
+            "<p class='meta'>The toy swings inside the servo window set below. Lowering the minimum angle and/or raising the maximum angle gives the servo more room to travel. A wider gap usually means stronger-looking swings, as long as your hardware can move safely in that range.</p>"
+            "<p class='meta'>Beginner stays gentler. Intermediate and Advanced now aim farther from center and move faster.</p></div>");
 
   page += F("<div class='card'><form action='/set' method='get'>");
-  page += F("<label for='min'>SERVO_MIN_DEG</label>");
+  page += F("<label for='min'>Left limit / minimum angle (SERVO_MIN_DEG)</label>");
   page += F("<input id='min' name='min' type='number' min='0' max='170' value='");
   page += String(SERVO_MIN_DEG);
   page += F("'>");
 
-  page += F("<label for='max'>SERVO_MAX_DEG</label>");
+  page += F("<label for='max'>Right limit / maximum angle (SERVO_MAX_DEG)</label>");
   page += F("<input id='max' name='max' type='number' min='10' max='180' value='");
   page += String(SERVO_MAX_DEG);
   page += F("'>");
@@ -371,7 +411,8 @@ String htmlPage() {
   page += F("<button type='submit'>Apply</button>");
   page += F("</form>");
   page += F("<p class='meta'>For safety this sketch requires max &gt; min and at least 20 degrees of spread. "
-            "When you apply a new window, REST is re-centered automatically and saved to LittleFS for the next boot.</p>");
+            "When you apply a new window, the rest position is re-centered automatically and the setting is saved to LittleFS for the next boot.</p>");
+  page += F("<p class='meta'>Example: changing 25&deg;-155&deg; to 15&deg;-165&deg; gives the servo a wider safe play area, if your toy can handle it without hitting stops or the teaser wire.</p>");
   page += F("</div>");
 
   page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
@@ -448,17 +489,17 @@ void runOneMove(PlayMode mode) {
   // advanced:     value in [-1.0, +1.0], sleep 0..1 sec
   switch (mode) {
     case MODE_BEGINNER:
-      servoValue10 = random(-6, 7);                 // -0.6 .. +0.6
+      servoValue10 = randomServoValueTenthsForMode(mode);
       sleepMs = (unsigned long)random(0, 4) * 1000UL;
       break;
 
     case MODE_INTERMEDIATE:
-      servoValue10 = random(-10, 11);               // -1.0 .. +1.0
+      servoValue10 = randomServoValueTenthsForMode(mode);
       sleepMs = (unsigned long)random(0, 3) * 1000UL;
       break;
 
     case MODE_ADVANCED:
-      servoValue10 = random(-10, 11);               // -1.0 .. +1.0
+      servoValue10 = randomServoValueTenthsForMode(mode);
       sleepMs = (unsigned long)random(0, 2) * 1000UL;
       break;
   }
@@ -467,6 +508,8 @@ void runOneMove(PlayMode mode) {
 
   Serial.print("Mode: ");
   Serial.print(modeName(mode));
+  Serial.print(" | Value: ");
+  Serial.print(servoValue10 / 10.0);
   Serial.print(" | Target angle: ");
   Serial.print(targetDeg);
   Serial.print(" | Window: ");
