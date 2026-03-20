@@ -60,7 +60,14 @@ const int DEFAULT_AUTO_REST_MAX_MINUTES = 5;
 const bool DEFAULT_SCHEDULE_ENABLED = false;
 const int DEFAULT_SCHEDULE_START_MINUTE = 9 * 60;
 const int DEFAULT_SCHEDULE_END_MINUTE = 17 * 60;
+const bool DEFAULT_SCHEDULE_SECOND_ENABLED = false;
+const int DEFAULT_SCHEDULE_SECOND_START_MINUTE = 18 * 60;
+const int DEFAULT_SCHEDULE_SECOND_END_MINUTE = 19 * 60;
 const char* DEFAULT_TIMEZONE_TZ = "EST5EDT,M3.2.0/2,M11.1.0/2";
+const int UI_INPUT_BORDER_RADIUS_PX = 14;
+const char* UI_PAGE_BACKGROUND_COLOR = "#000000";
+const char* UI_PRIMARY_BUTTON_COLOR = "#d4af37";
+const char* UI_CARD_BORDER_COLOR = "#d4af37";
 
 ESP8266WebServer server(80);
 Servo wandServo;
@@ -89,6 +96,9 @@ char TIMEZONE_TZ[TIMEZONE_MAX_LEN + 1] = "EST5EDT,M3.2.0/2,M11.1.0/2";
 bool SCHEDULE_ENABLED = DEFAULT_SCHEDULE_ENABLED;
 int SCHEDULE_START_MINUTE = DEFAULT_SCHEDULE_START_MINUTE;
 int SCHEDULE_END_MINUTE = DEFAULT_SCHEDULE_END_MINUTE;
+bool SCHEDULE_SECOND_ENABLED = DEFAULT_SCHEDULE_SECOND_ENABLED;
+int SCHEDULE_SECOND_START_MINUTE = DEFAULT_SCHEDULE_SECOND_START_MINUTE;
+int SCHEDULE_SECOND_END_MINUTE = DEFAULT_SCHEDULE_SECOND_END_MINUTE;
 
 enum PlayMode {
   MODE_LAZY,
@@ -233,184 +243,6 @@ void copyBoundedString(char* dest, size_t destSize, const String& value) {
   dest[copyLen] = '\0';
 }
 
-String jsonEscape(const char* value) {
-  String escaped;
-  escaped.reserve(strlen(value) + 8);
-
-  for (size_t i = 0; value[i] != '\0'; i++) {
-    char c = value[i];
-    if (c == '\\' || c == '\"') {
-      escaped += '\\';
-      escaped += c;
-    } else if (c == '\n') {
-      escaped += F("\\n");
-    } else if (c == '\r') {
-      escaped += F("\\r");
-    } else {
-      escaped += c;
-    }
-  }
-
-  return escaped;
-}
-
-String htmlEscape(const char* value) {
-  String escaped;
-  escaped.reserve(strlen(value) + 8);
-
-  for (size_t i = 0; value[i] != '\0'; i++) {
-    char c = value[i];
-    if (c == '&') escaped += F("&amp;");
-    else if (c == '<') escaped += F("&lt;");
-    else if (c == '>') escaped += F("&gt;");
-    else if (c == '\"') escaped += F("&quot;");
-    else if (c == '\'') escaped += F("&#39;");
-    else escaped += c;
-  }
-
-  return escaped;
-}
-
-bool extractJsonInt(const String& json, const char* key, int& valueOut) {
-  String quotedKey = String("\"") + key + "\"";
-  int keyPos = json.indexOf(quotedKey);
-  if (keyPos < 0) return false;
-
-  int colonPos = json.indexOf(':', keyPos + quotedKey.length());
-  if (colonPos < 0) return false;
-
-  int valueStart = colonPos + 1;
-  while (valueStart < json.length() && isspace(json[valueStart])) {
-    valueStart++;
-  }
-
-  int valueEnd = valueStart;
-  if (valueEnd < json.length() && json[valueEnd] == '-') {
-    valueEnd++;
-  }
-
-  while (valueEnd < json.length() && isdigit(json[valueEnd])) {
-    valueEnd++;
-  }
-
-  if (valueEnd == valueStart) return false;
-
-  valueOut = json.substring(valueStart, valueEnd).toInt();
-  return true;
-}
-
-bool extractJsonBool(const String& json, const char* key, bool& valueOut) {
-  String quotedKey = String("\"") + key + "\"";
-  int keyPos = json.indexOf(quotedKey);
-  if (keyPos < 0) return false;
-
-  int colonPos = json.indexOf(':', keyPos + quotedKey.length());
-  if (colonPos < 0) return false;
-
-  int valueStart = colonPos + 1;
-  while (valueStart < json.length() && isspace(json[valueStart])) {
-    valueStart++;
-  }
-
-  if (json.startsWith("true", valueStart)) {
-    valueOut = true;
-    return true;
-  }
-
-  if (json.startsWith("false", valueStart)) {
-    valueOut = false;
-    return true;
-  }
-
-  return false;
-}
-
-bool extractJsonString(const String& json, const char* key, String& valueOut) {
-  String quotedKey = String("\"") + key + "\"";
-  int keyPos = json.indexOf(quotedKey);
-  if (keyPos < 0) return false;
-
-  int colonPos = json.indexOf(':', keyPos + quotedKey.length());
-  if (colonPos < 0) return false;
-
-  int valueStart = colonPos + 1;
-  while (valueStart < json.length() && isspace(json[valueStart])) {
-    valueStart++;
-  }
-
-  if (valueStart >= json.length() || json[valueStart] != '\"') return false;
-  valueStart++;
-
-  String result;
-  for (int i = valueStart; i < json.length(); i++) {
-    char c = json[i];
-    if (c == '\\') {
-      i++;
-      if (i >= json.length()) return false;
-      char escaped = json[i];
-      if (escaped == 'n') result += '\n';
-      else if (escaped == 'r') result += '\r';
-      else result += escaped;
-    } else if (c == '\"') {
-      valueOut = result;
-      return true;
-    } else {
-      result += c;
-    }
-  }
-
-  return false;
-}
-
-bool readJsonFileIfExists(const char* path, String& jsonOut) {
-  if (!littleFsReady || !LittleFS.exists(path)) return false;
-
-  File file = LittleFS.open(path, "r");
-  if (!file) {
-    Serial.print("Failed to open ");
-    Serial.print(path);
-    Serial.println(" for read.");
-    return false;
-  }
-
-  jsonOut = file.readString();
-  file.close();
-  return true;
-}
-
-bool writeJsonFile(const char* path, const String& json) {
-  if (!littleFsReady) return false;
-
-  File file = LittleFS.open(path, "w");
-  if (!file) {
-    Serial.print("Failed to open ");
-    Serial.print(path);
-    Serial.println(" for write.");
-    return false;
-  }
-
-  size_t written = file.print(json);
-  file.close();
-
-  if (written != json.length()) {
-    Serial.print("Failed to write full JSON file: ");
-    Serial.println(path);
-    return false;
-  }
-
-  return true;
-}
-
-bool deleteFileIfExists(const char* path) {
-  if (!littleFsReady || !LittleFS.exists(path)) return true;
-
-  if (LittleFS.remove(path)) return true;
-
-  Serial.print("Failed to remove ");
-  Serial.println(path);
-  return false;
-}
-
 int maxSafeAmplitude() {
   int leftRoom = SERVO_REST_DEG - SERVO_MIN_DEG;
   int rightRoom = SERVO_MAX_DEG - SERVO_REST_DEG;
@@ -502,9 +334,9 @@ int stepDegForMode(PlayMode mode) {
 
 unsigned long sessionDurationMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY: return randRangeUL(20000UL, 35000UL);
-    case MODE_PLAYFUL: return randRangeUL(30000UL, 50000UL);
-    case MODE_ZOOMIES: return randRangeUL(40000UL, 65000UL);
+    case MODE_LAZY: return randRangeUL(30000UL, 45000UL);
+    case MODE_PLAYFUL: return randRangeUL(40000UL, 60000UL);
+    case MODE_ZOOMIES: return randRangeUL(50000UL, 75000UL);
   }
   return 30000UL;
 }
@@ -588,48 +420,6 @@ String localTimeDisplayText() {
   return String(buf);
 }
 
-String wifiDiagnosticsHtml(unsigned long now) {
-  String html;
-  html.reserve(640);
-
-  wl_status_t status = WiFi.status();
-  html += F("<div><strong>Saved SSID:</strong> ");
-  html += (WIFI_SSID[0] != '\0') ? htmlEscape(WIFI_SSID) : String("(none)");
-  html += F("</div><div><strong>STA status:</strong> ");
-  html += stationStatusName(status);
-  html += F("</div><div><strong>Last STA status change:</strong> ");
-  html += String((now - lastStationStatusChangeMs) / 1000UL);
-  html += F(" s ago</div>");
-
-  if (stationConnectAttemptActive) {
-    html += F("<div><strong>Current connect attempt:</strong> ");
-    html += String((now - wifiConnectAttemptStartMs) / 1000UL);
-    html += F(" s elapsed</div>");
-  } else if (hasSavedWifiCredentials && !wifiSetupModeForced && networkBootStarted && status != WL_CONNECTED) {
-    unsigned long retryMs = 0;
-    if (lastWifiConnectAttemptMs > 0) {
-      unsigned long elapsed = now - lastWifiConnectAttemptMs;
-      retryMs = (elapsed >= WIFI_RETRY_INTERVAL_MS) ? 0 : (WIFI_RETRY_INTERVAL_MS - elapsed);
-    }
-
-    html += F("<div><strong>Next reconnect attempt:</strong> ");
-    html += String(retryMs / 1000UL);
-    html += F(" s</div>");
-  }
-
-  if (status == WL_CONNECTED) {
-    html += F("<div><strong>STA IP:</strong> ");
-    html += WiFi.localIP().toString();
-    html += F("</div>");
-  }
-
-  html += F("<div><strong>NTP sync requested:</strong> ");
-  html += timeSyncRequested ? "yes" : "no";
-  html += F("</div>");
-
-  return html;
-}
-
 String formatMinuteOfDay(int minuteOfDay) {
   if (!validateScheduleMinute(minuteOfDay)) return "--:--";
 
@@ -639,6 +429,20 @@ String formatMinuteOfDay(int minuteOfDay) {
   char buf[6];
   snprintf(buf, sizeof(buf), "%02d:%02d", hour, minute);
   return String(buf);
+}
+
+String scheduleWindowLabel(int startMinute, int endMinute) {
+  String label = formatMinuteOfDay(startMinute);
+  label += " to ";
+  label += formatMinuteOfDay(endMinute);
+
+  if (startMinute == endMinute) {
+    label += " (all day)";
+  } else if (startMinute > endMinute) {
+    label += " (overnight)";
+  }
+
+  return label;
 }
 
 bool parseTimeArg(const String& value, int& minuteOut) {
@@ -677,10 +481,31 @@ void applyTimezoneSetting(const String& tz) {
   timezoneApplied = false;
 }
 
-void applyScheduleConfig(bool enabled, int startMinute, int endMinute) {
+void applyScheduleConfig(bool enabled, int startMinute, int endMinute,
+                         bool secondEnabled, int secondStartMinute, int secondEndMinute) {
   SCHEDULE_ENABLED = enabled;
   SCHEDULE_START_MINUTE = startMinute;
   SCHEDULE_END_MINUTE = endMinute;
+  SCHEDULE_SECOND_ENABLED = secondEnabled;
+  SCHEDULE_SECOND_START_MINUTE = secondStartMinute;
+  SCHEDULE_SECOND_END_MINUTE = secondEndMinute;
+}
+
+void refreshScheduleRuntimeStateAfterConfigChange(bool allowImmediateStart) {
+  scheduleWindowWasOpen = isScheduleWindowOpenNow();
+
+  if (!allowImmediateStart) {
+    scheduleStartPending = false;
+    return;
+  }
+
+  if (scheduleWindowWasOpen &&
+      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
+    nextAutoSessionMs = millis();
+    scheduleStartPending = false;
+  } else {
+    scheduleStartPending = scheduleWindowWasOpen;
+  }
 }
 
 void applyDefaultConfig() {
@@ -689,16 +514,12 @@ void applyDefaultConfig() {
   applyRestWindowMinutes(DEFAULT_AUTO_REST_MIN_MINUTES, DEFAULT_AUTO_REST_MAX_MINUTES);
   applyWifiCredentials("", "");
   applyTimezoneSetting(DEFAULT_TIMEZONE_TZ);
-  applyScheduleConfig(DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_START_MINUTE, DEFAULT_SCHEDULE_END_MINUTE);
-}
-
-bool clearAllSavedConfig() {
-  bool ok = true;
-  ok = deleteFileIfExists(MOTION_CONFIG_PATH) && ok;
-  ok = deleteFileIfExists(WIFI_CONFIG_PATH) && ok;
-  ok = deleteFileIfExists(SCHEDULE_CONFIG_PATH) && ok;
-  ok = deleteFileIfExists(LEGACY_CONFIG_PATH) && ok;
-  return ok;
+  applyScheduleConfig(DEFAULT_SCHEDULE_ENABLED,
+                      DEFAULT_SCHEDULE_START_MINUTE,
+                      DEFAULT_SCHEDULE_END_MINUTE,
+                      DEFAULT_SCHEDULE_SECOND_ENABLED,
+                      DEFAULT_SCHEDULE_SECOND_START_MINUTE,
+                      DEFAULT_SCHEDULE_SECOND_END_MINUTE);
 }
 
 void setLed(bool on) {
@@ -736,6 +557,14 @@ bool isMinuteWithinScheduleWindow(int currentMinute, int startMinute, int endMin
   return currentMinute >= startMinute || currentMinute < endMinute;
 }
 
+bool isScheduleWindowSetOpenNow(int currentMinute, int startMinute, int endMinute,
+                                bool secondEnabled, int secondStartMinute, int secondEndMinute) {
+  if (isMinuteWithinScheduleWindow(currentMinute, startMinute, endMinute)) return true;
+  if (!secondEnabled) return false;
+
+  return isMinuteWithinScheduleWindow(currentMinute, secondStartMinute, secondEndMinute);
+}
+
 bool isScheduleWindowOpenNow() {
   if (!SCHEDULE_ENABLED) return true;
   if (!timeValid || !isTimeValid()) return false;
@@ -743,7 +572,12 @@ bool isScheduleWindowOpenNow() {
   int currentMinute = currentLocalMinuteOfDay();
   if (currentMinute < 0) return false;
 
-  return isMinuteWithinScheduleWindow(currentMinute, SCHEDULE_START_MINUTE, SCHEDULE_END_MINUTE);
+  return isScheduleWindowSetOpenNow(currentMinute,
+                                    SCHEDULE_START_MINUTE,
+                                    SCHEDULE_END_MINUTE,
+                                    SCHEDULE_SECOND_ENABLED,
+                                    SCHEDULE_SECOND_START_MINUTE,
+                                    SCHEDULE_SECOND_END_MINUTE);
 }
 
 void applyTimezoneIfNeeded() {
@@ -1115,221 +949,6 @@ void applyRestWindowMinutes(int minMinutes, int maxMinutes) {
   settingsChanged = true;
 }
 
-bool saveMotionConfig() {
-  String json = "{\"servoMinDeg\":";
-  json += String(SERVO_MIN_DEG);
-  json += ",\"servoMaxDeg\":";
-  json += String(SERVO_MAX_DEG);
-  json += ",\"lazyStepDelayMs\":";
-  json += String(LAZY_STEP_DELAY_MS);
-  json += ",\"playfulStepDelayMs\":";
-  json += String(PLAYFUL_STEP_DELAY_MS);
-  json += ",\"zoomiesStepDelayMs\":";
-  json += String(ZOOMIES_STEP_DELAY_MS);
-  json += ",\"autoRestMinMinutes\":";
-  json += String(AUTO_REST_MIN_MINUTES);
-  json += ",\"autoRestMaxMinutes\":";
-  json += String(AUTO_REST_MAX_MINUTES);
-  json += "}\n";
-
-  return writeJsonFile(MOTION_CONFIG_PATH, json);
-}
-
-bool saveWifiConfig() {
-  String json = "{\"wifiSsid\":\"";
-  json += jsonEscape(WIFI_SSID);
-  json += "\",\"wifiPass\":\"";
-  json += jsonEscape(WIFI_PASS);
-  json += "\"}\n";
-
-  return writeJsonFile(WIFI_CONFIG_PATH, json);
-}
-
-bool saveScheduleConfig() {
-  String json = "{\"timezoneTz\":\"";
-  json += jsonEscape(TIMEZONE_TZ);
-  json += "\",\"scheduleEnabled\":";
-  json += SCHEDULE_ENABLED ? "true" : "false";
-  json += ",\"scheduleStartMinute\":";
-  json += String(SCHEDULE_START_MINUTE);
-  json += ",\"scheduleEndMinute\":";
-  json += String(SCHEDULE_END_MINUTE);
-  json += "}\n";
-
-  return writeJsonFile(SCHEDULE_CONFIG_PATH, json);
-}
-
-void loadMotionConfig() {
-  if (!littleFsReady) return;
-
-  String json;
-  bool loadedFromLegacy = false;
-  if (!readJsonFileIfExists(MOTION_CONFIG_PATH, json)) {
-    if (!readJsonFileIfExists(LEGACY_CONFIG_PATH, json)) {
-      Serial.println("No saved motion config found. Using defaults.");
-      return;
-    }
-    loadedFromLegacy = true;
-  }
-
-  int savedMin = 0;
-  int savedMax = 0;
-  int savedLazyDelay = LAZY_STEP_DELAY_MS;
-  int savedPlayfulDelay = PLAYFUL_STEP_DELAY_MS;
-  int savedZoomiesDelay = ZOOMIES_STEP_DELAY_MS;
-  int savedRestMinMinutes = AUTO_REST_MIN_MINUTES;
-  int savedRestMaxMinutes = AUTO_REST_MAX_MINUTES;
-
-  if (!extractJsonInt(json, "servoMinDeg", savedMin) ||
-      !extractJsonInt(json, "servoMaxDeg", savedMax)) {
-    Serial.println("Motion config missing required fields. Using defaults.");
-    return;
-  }
-
-  if (!validateServoWindow(savedMin, savedMax)) {
-    Serial.println("Saved servo window is invalid. Using defaults.");
-    return;
-  }
-
-  applyServoWindow(savedMin, savedMax);
-
-  bool hasLazyDelay = extractJsonInt(json, "lazyStepDelayMs", savedLazyDelay) ||
-                      extractJsonInt(json, "beginnerStepDelayMs", savedLazyDelay);
-  bool hasPlayfulDelay = extractJsonInt(json, "playfulStepDelayMs", savedPlayfulDelay) ||
-                         extractJsonInt(json, "intermediateStepDelayMs", savedPlayfulDelay);
-  bool hasZoomiesDelay = extractJsonInt(json, "zoomiesStepDelayMs", savedZoomiesDelay) ||
-                         extractJsonInt(json, "advancedStepDelayMs", savedZoomiesDelay);
-
-  if (hasLazyDelay && hasPlayfulDelay && hasZoomiesDelay &&
-      validateStepDelayMs(savedLazyDelay) &&
-      validateStepDelayMs(savedPlayfulDelay) &&
-      validateStepDelayMs(savedZoomiesDelay)) {
-    applyStepDelays(savedLazyDelay, savedPlayfulDelay, savedZoomiesDelay);
-  } else if (hasLazyDelay || hasPlayfulDelay || hasZoomiesDelay) {
-    Serial.println("Saved speed settings invalid. Using default speed settings.");
-  }
-
-  bool hasRestMinMinutes = extractJsonInt(json, "autoRestMinMinutes", savedRestMinMinutes);
-  bool hasRestMaxMinutes = extractJsonInt(json, "autoRestMaxMinutes", savedRestMaxMinutes);
-
-  if (hasRestMinMinutes && hasRestMaxMinutes &&
-      validateRestWindowMinutes(savedRestMinMinutes, savedRestMaxMinutes)) {
-    applyRestWindowMinutes(savedRestMinMinutes, savedRestMaxMinutes);
-  } else if (hasRestMinMinutes || hasRestMaxMinutes) {
-    Serial.println("Saved rest window is invalid. Using default rest window.");
-  }
-
-  Serial.print("Loaded servo window from ");
-  Serial.print(loadedFromLegacy ? LEGACY_CONFIG_PATH : MOTION_CONFIG_PATH);
-  Serial.print(": ");
-  Serial.print(SERVO_MIN_DEG);
-  Serial.print(" to ");
-  Serial.println(SERVO_MAX_DEG);
-  Serial.print("Loaded step delays (ms): ");
-  Serial.print(LAZY_STEP_DELAY_MS);
-  Serial.print(", ");
-  Serial.print(PLAYFUL_STEP_DELAY_MS);
-  Serial.print(", ");
-  Serial.println(ZOOMIES_STEP_DELAY_MS);
-  Serial.print("Loaded rest window (minutes): ");
-  Serial.print(AUTO_REST_MIN_MINUTES);
-  Serial.print(" to ");
-  Serial.println(AUTO_REST_MAX_MINUTES);
-}
-
-void loadWifiConfig() {
-  if (!littleFsReady) return;
-
-  String json;
-  bool loadedFromLegacy = false;
-  if (!readJsonFileIfExists(WIFI_CONFIG_PATH, json)) {
-    if (!readJsonFileIfExists(LEGACY_CONFIG_PATH, json)) {
-      Serial.println("No saved Wi-Fi config found. Using defaults.");
-      return;
-    }
-    loadedFromLegacy = true;
-  }
-
-  String savedWifiSsid = WIFI_SSID;
-  String savedWifiPass = WIFI_PASS;
-
-  if (extractJsonString(json, "wifiSsid", savedWifiSsid)) {
-    if (savedWifiSsid.length() > WIFI_SSID_MAX_LEN) {
-      Serial.println("Saved Wi-Fi SSID too long. Ignoring saved SSID.");
-      savedWifiSsid = "";
-    }
-  }
-
-  if (extractJsonString(json, "wifiPass", savedWifiPass)) {
-    if (savedWifiPass.length() > WIFI_PASS_MAX_LEN) {
-      Serial.println("Saved Wi-Fi password too long. Ignoring saved password.");
-      savedWifiPass = "";
-    }
-  }
-
-  applyWifiCredentials(savedWifiSsid, savedWifiPass);
-  Serial.print("Loaded Wi-Fi SSID from ");
-  Serial.print(loadedFromLegacy ? LEGACY_CONFIG_PATH : WIFI_CONFIG_PATH);
-  Serial.print(": ");
-  Serial.println(hasSavedWifiCredentials ? WIFI_SSID : "(none)");
-}
-
-void loadScheduleConfig() {
-  if (!littleFsReady) return;
-
-  String json;
-  bool loadedFromLegacy = false;
-  if (!readJsonFileIfExists(SCHEDULE_CONFIG_PATH, json)) {
-    if (!readJsonFileIfExists(LEGACY_CONFIG_PATH, json)) {
-      Serial.println("No saved schedule config found. Using defaults.");
-      return;
-    }
-    loadedFromLegacy = true;
-  }
-
-  int savedScheduleStartMinute = SCHEDULE_START_MINUTE;
-  int savedScheduleEndMinute = SCHEDULE_END_MINUTE;
-  bool savedScheduleEnabled = SCHEDULE_ENABLED;
-  String savedTimezoneTz = TIMEZONE_TZ;
-
-  if (extractJsonString(json, "timezoneTz", savedTimezoneTz)) {
-    if (!validateTimezoneTz(savedTimezoneTz)) {
-      Serial.println("Saved timezone invalid. Using default timezone.");
-      savedTimezoneTz = TIMEZONE_TZ;
-    }
-  }
-
-  bool hasScheduleEnabled = extractJsonBool(json, "scheduleEnabled", savedScheduleEnabled);
-  bool hasScheduleStart = extractJsonInt(json, "scheduleStartMinute", savedScheduleStartMinute);
-  bool hasScheduleEnd = extractJsonInt(json, "scheduleEndMinute", savedScheduleEndMinute);
-
-  if (hasScheduleStart && !validateScheduleMinute(savedScheduleStartMinute)) {
-    Serial.println("Saved schedule start minute invalid. Using default schedule start.");
-    savedScheduleStartMinute = SCHEDULE_START_MINUTE;
-  }
-
-  if (hasScheduleEnd && !validateScheduleMinute(savedScheduleEndMinute)) {
-    Serial.println("Saved schedule end minute invalid. Using default schedule end.");
-    savedScheduleEndMinute = SCHEDULE_END_MINUTE;
-  }
-
-  applyTimezoneSetting(savedTimezoneTz);
-
-  if (hasScheduleEnabled || hasScheduleStart || hasScheduleEnd) {
-    applyScheduleConfig(savedScheduleEnabled, savedScheduleStartMinute, savedScheduleEndMinute);
-  }
-
-  Serial.print("Loaded timezone: ");
-  Serial.print(loadedFromLegacy ? LEGACY_CONFIG_PATH : SCHEDULE_CONFIG_PATH);
-  Serial.print(" -> ");
-  Serial.println(TIMEZONE_TZ);
-  Serial.print("Loaded schedule: ");
-  Serial.print(SCHEDULE_ENABLED ? "enabled " : "disabled ");
-  Serial.print(formatMinuteOfDay(SCHEDULE_START_MINUTE));
-  Serial.print(" to ");
-  Serial.println(formatMinuteOfDay(SCHEDULE_END_MINUTE));
-}
-
 bool canAutoStartSessions() {
   if (!SCHEDULE_ENABLED) {
     logScheduleDecisionIfChanged(SCHEDULE_DECISION_DISABLED);
@@ -1547,478 +1166,6 @@ void runSessionForMode(PlayMode modeAtStart) {
   finishSession(modeAtStart);
 }
 
-String htmlSelectedAttr(bool selected) {
-  return selected ? F(" selected") : String("");
-}
-
-String htmlCheckedAttr(bool checked) {
-  return checked ? F(" checked") : String("");
-}
-
-String htmlPage() {
-  PlayMode mode = readModeSwitch();
-  unsigned long now = millis();
-
-  String page;
-  page.reserve(9000);
-
-  page += F(
-    "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>Cat Toy Control</title>"
-    "<style>"
-    "body{font-family:Arial,sans-serif;max-width:780px;margin:24px auto;padding:0 16px;line-height:1.45;}"
-    ".card{border:1px solid #ddd;border-radius:12px;padding:16px;margin-bottom:16px;}"
-    ".hint{background:#f7f7f7;border-left:4px solid #4f6d4a;}"
-    ".meta{color:#444;font-size:14px;}"
-    ".actions form{display:inline-block;margin:8px 8px 0 0;}"
-    "label{display:block;margin-top:12px;font-weight:600;}"
-    "input[type=number],input[type=time],input[type=text],input[type=password],select{width:100%;padding:10px;font-size:16px;box-sizing:border-box;}"
-    "button{margin-top:16px;padding:12px 16px;font-size:16px;border-radius:10px;border:0;cursor:pointer;}"
-    ".secondary{background:#ececec;color:#111;}"
-    ".danger{background:#b64332;color:#fff;}"
-    ".status{display:grid;grid-template-columns:1fr;gap:6px;}"
-    "</style></head><body>"
-    "<h1>Cat Toy Control</h1>"
-  );
-
-  page += F("<div class='card status'>");
-  page += F("<div><strong>Current mode:</strong> ");
-  page += modeName(mode);
-  page += F("</div><div><strong>Runtime state:</strong> ");
-  page += controllerStateName(controllerState);
-  page += F("</div><div><strong>Current servo window:</strong> ");
-  page += String(SERVO_MIN_DEG);
-  page += F("&deg; to ");
-  page += String(SERVO_MAX_DEG);
-  page += F("&deg;</div><div><strong>Current rest:</strong> ");
-  page += String(SERVO_REST_DEG);
-  page += F("&deg;</div><div><strong>Current swing from rest:</strong> up to ");
-  page += String(maxSafeAmplitude());
-  page += F("&deg; each side</div><div><strong>Auto rest window:</strong> ");
-  page += String(AUTO_REST_MIN_MINUTES);
-  page += F(" to ");
-  page += String(AUTO_REST_MAX_MINUTES);
-  page += F(" min</div><div><strong>Wi-Fi state:</strong> ");
-  page += wifiStatusText();
-  page += F("</div><div><strong>Time state:</strong> ");
-  page += timeStatusText();
-  page += F("</div><div><strong>Local time:</strong> ");
-  page += localTimeDisplayText();
-  page += F("</div><div><strong>Timezone:</strong> ");
-  page += timezoneLabelForTz(TIMEZONE_TZ);
-  page += F("</div><div><strong>Schedule:</strong> ");
-  page += scheduleDecisionReasonName(lastScheduleDecisionReason);
-  page += F("</div><div><strong>Schedule window:</strong> ");
-  page += formatMinuteOfDay(SCHEDULE_START_MINUTE);
-  page += F(" to ");
-  page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
-  if (SCHEDULE_START_MINUTE == SCHEDULE_END_MINUTE) {
-    page += F(" (all day)");
-  } else if (SCHEDULE_START_MINUTE > SCHEDULE_END_MINUTE) {
-    page += F(" (overnight)");
-  }
-  page += F("</div>");
-  page += wifiDiagnosticsHtml(now);
-
-  if (controllerState == STATE_STARTUP) {
-    unsigned long warmupRemainingMs = (startupEndMs > now) ? (startupEndMs - now) : 0;
-    unsigned long gestureRemainingMs = (bootGestureWindowEndMs > now) ? (bootGestureWindowEndMs - now) : 0;
-    page += F("<div><strong>Warmup remaining:</strong> ");
-    page += String(warmupRemainingMs / 1000UL);
-    page += F(" s</div><div><strong>Boot gesture window:</strong> ");
-    page += String(gestureRemainingMs / 1000UL);
-    page += F(" s remaining</div>");
-  } else {
-    unsigned long nextInMs = (nextAutoSessionMs > now) ? (nextAutoSessionMs - now) : 0;
-    page += F("<div><strong>Next auto session timer:</strong> ");
-    page += String(nextInMs / 1000UL);
-    page += F(" s</div>");
-  }
-
-  page += F("</div>");
-
-  page += F("<div class='card hint'><strong>Runtime model</strong>"
-            "<p class='meta'>Manual Start Session Now still works any time. The saved schedule only gates autonomous starts when local time is valid.</p>"
-            "<p class='meta'>If saved Wi-Fi is available, the toy keeps the local AP UI up while it also attempts station Wi-Fi and NTP time in the background.</p></div>");
-
-  page += F("<div class='card actions'><strong>Manual control</strong>"
-            "<form action='/start' method='post'><button type='submit'>Start Session Now</button></form>"
-            "<form action='/park' method='post'><button class='secondary' type='submit'>Park At Rest</button></form>"
-            "<p class='meta'>Start now forces the next session immediately, even outside the saved schedule. Park ends the current session as soon as the sketch reaches an interrupt check and returns the servo to rest.</p></div>");
-
-  page += F("<div class='card'><form action='/set' method='get'>");
-  page += F("<label for='min'>Left limit / minimum angle (SERVO_MIN_DEG)</label>");
-  page += F("<input id='min' name='min' type='number' min='0' max='170' value='");
-  page += String(SERVO_MIN_DEG);
-  page += F("'>");
-
-  page += F("<label for='max'>Right limit / maximum angle (SERVO_MAX_DEG)</label>");
-  page += F("<input id='max' name='max' type='number' min='10' max='180' value='");
-  page += String(SERVO_MAX_DEG);
-  page += F("'>");
-
-  page += F("<label for='lazyDelay'>Lazy speed delay in ms</label>");
-  page += F("<input id='lazyDelay' name='lazyDelay' type='number' min='2' max='25' value='");
-  page += String(LAZY_STEP_DELAY_MS);
-  page += F("'>");
-
-  page += F("<label for='playfulDelay'>Playful speed delay in ms</label>");
-  page += F("<input id='playfulDelay' name='playfulDelay' type='number' min='2' max='25' value='");
-  page += String(PLAYFUL_STEP_DELAY_MS);
-  page += F("'>");
-
-  page += F("<label for='zoomiesDelay'>Zoomies speed delay in ms</label>");
-  page += F("<input id='zoomiesDelay' name='zoomiesDelay' type='number' min='2' max='25' value='");
-  page += String(ZOOMIES_STEP_DELAY_MS);
-  page += F("'>");
-
-  page += F("<label for='restMinMinutes'>Minimum rest between sessions in minutes</label>");
-  page += F("<input id='restMinMinutes' name='restMinMinutes' type='number' min='1' max='240' value='");
-  page += String(AUTO_REST_MIN_MINUTES);
-  page += F("'>");
-
-  page += F("<label for='restMaxMinutes'>Maximum rest between sessions in minutes</label>");
-  page += F("<input id='restMaxMinutes' name='restMaxMinutes' type='number' min='1' max='240' value='");
-  page += String(AUTO_REST_MAX_MINUTES);
-  page += F("'>");
-
-  page += F("<button type='submit'>Apply Motion Settings</button>");
-  page += F("</form>");
-  page += F("<p class='meta'>Servo limits must keep max &gt; min with at least 20 degrees of spread. Rest remains auto-centered in the safe window.</p>");
-  page += F("</div>");
-
-  page += F("<div class='card'><strong>Wi-Fi and schedule</strong>");
-  page += F("<form action='/wifi' method='post'>");
-  page += F("<label for='wifiSsid'>Home Wi-Fi SSID</label>");
-  page += F("<input id='wifiSsid' name='wifiSsid' type='text' maxlength='32' value='");
-  page += htmlEscape(WIFI_SSID);
-  page += F("'>");
-
-  page += F("<label for='wifiPass'>Home Wi-Fi password</label>");
-  page += F("<input id='wifiPass' name='wifiPass' type='password' maxlength='63' value='");
-  page += htmlEscape(WIFI_PASS);
-  page += F("'>");
-  page += F("<button type='submit'>Save Wi-Fi</button>");
-  page += F("</form>");
-  page += F("<form action='/clear-wifi' method='post'><button class='danger' type='submit'>Clear Saved Wi-Fi</button></form>");
-
-  page += F("<form action='/schedule' method='post'>");
-  page += F("<label for='timezoneTz'>Timezone</label><select id='timezoneTz' name='timezoneTz'>");
-  for (size_t i = 0; i < sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]); i++) {
-    page += F("<option value='");
-    page += TIMEZONE_OPTIONS[i].tz;
-    page += F("'");
-    page += htmlSelectedAttr(strcmp(TIMEZONE_TZ, TIMEZONE_OPTIONS[i].tz) == 0);
-    page += F(">");
-    page += TIMEZONE_OPTIONS[i].label;
-    page += F("</option>");
-  }
-  page += F("</select>");
-
-  page += F("<label><input name='scheduleEnabled' type='checkbox' value='1'");
-  page += htmlCheckedAttr(SCHEDULE_ENABLED);
-  page += F("> Enable scheduled auto-start</label>");
-
-  page += F("<label for='scheduleStart'>Daily schedule start</label>");
-  page += F("<input id='scheduleStart' name='scheduleStart' type='time' value='");
-  page += formatMinuteOfDay(SCHEDULE_START_MINUTE);
-  page += F("'>");
-
-  page += F("<label for='scheduleEnd'>Daily schedule end</label>");
-  page += F("<input id='scheduleEnd' name='scheduleEnd' type='time' value='");
-  page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
-  page += F("'>");
-
-  page += F("<button type='submit'>Save Schedule</button>");
-  page += F("</form>");
-  page += F("<p class='meta'>Use the boot gesture Lazy -> Playful -> Lazy during the first 4 seconds after boot to keep the toy in AP-only Wi-Fi setup mode for that boot.</p>");
-  page += F("<p class='meta'>If start and end times match, the schedule is treated as all day. Overnight windows are supported.</p>");
-  page += F("</div>");
-
-  page += F("<div class='card'><strong>Maintenance</strong>");
-  page += F("<form action='/clear-data' method='post' onsubmit=\"return confirm('Clear all saved settings and return to defaults?');\">");
-  page += F("<button class='danger' type='submit'>Clear All Saved Data</button>");
-  page += F("</form>");
-  page += F("<p class='meta'>This deletes all saved motion, Wi-Fi, and schedule data from LittleFS, including the legacy config file, and resets this boot to default settings.</p>");
-  page += F("</div>");
-
-  page += F("<div class='card meta'>Connect to Wi-Fi <strong>");
-  page += AP_SSID;
-  page += F("</strong> and browse to <strong>http://192.168.4.1</strong>. The local AP stays available even when station Wi-Fi is configured.</div>");
-
-  page += F("</body></html>");
-  return page;
-}
-
-void handleRoot() {
-  server.send(200, "text/html", htmlPage());
-}
-
-void handleSet() {
-  bool hasLazyArg = server.hasArg("lazyDelay") || server.hasArg("beginnerDelay");
-  bool hasPlayfulArg = server.hasArg("playfulDelay") || server.hasArg("intermediateDelay");
-  bool hasZoomiesArg = server.hasArg("zoomiesDelay") || server.hasArg("advancedDelay");
-  bool hasRestMinArg = server.hasArg("restMinMinutes");
-  bool hasRestMaxArg = server.hasArg("restMaxMinutes");
-
-  if (!server.hasArg("min") || !server.hasArg("max") ||
-      !hasLazyArg || !hasPlayfulArg || !hasZoomiesArg ||
-      !hasRestMinArg || !hasRestMaxArg) {
-    server.send(400, "text/plain", "Missing one or more required parameters.");
-    return;
-  }
-
-  int newMin = server.arg("min").toInt();
-  int newMax = server.arg("max").toInt();
-  int newLazyDelay = server.hasArg("lazyDelay") ? server.arg("lazyDelay").toInt()
-                                                : server.arg("beginnerDelay").toInt();
-  int newPlayfulDelay = server.hasArg("playfulDelay") ? server.arg("playfulDelay").toInt()
-                                                      : server.arg("intermediateDelay").toInt();
-  int newZoomiesDelay = server.hasArg("zoomiesDelay") ? server.arg("zoomiesDelay").toInt()
-                                                      : server.arg("advancedDelay").toInt();
-  int newRestMinMinutes = server.arg("restMinMinutes").toInt();
-  int newRestMaxMinutes = server.arg("restMaxMinutes").toInt();
-
-  if (!validateServoWindow(newMin, newMax)) {
-    server.send(400, "text/plain",
-                "Servo limits must stay in range, keep max > min, and keep at least 20 degrees between them.");
-    return;
-  }
-
-  if (!validateStepDelayMs(newLazyDelay) ||
-      !validateStepDelayMs(newPlayfulDelay) ||
-      !validateStepDelayMs(newZoomiesDelay)) {
-    server.send(400, "text/plain", "Each speed delay must be between 2 and 25 ms.");
-    return;
-  }
-
-  if (!validateRestWindowMinutes(newRestMinMinutes, newRestMaxMinutes)) {
-    server.send(400, "text/plain",
-                "Rest window must stay between 1 and 240 minutes, with max greater than or equal to min.");
-    return;
-  }
-
-  applyServoWindow(newMin, newMax);
-  applyStepDelays(newLazyDelay, newPlayfulDelay, newZoomiesDelay);
-  applyRestWindowMinutes(newRestMinMinutes, newRestMaxMinutes);
-
-  if (!saveMotionConfig()) {
-    server.send(500, "text/plain",
-                "Updated settings for this boot, but failed to save to LittleFS.");
-    return;
-  }
-
-  Serial.print("Updated servo window: ");
-  Serial.print(SERVO_MIN_DEG);
-  Serial.print(" to ");
-  Serial.println(SERVO_MAX_DEG);
-  Serial.print("Updated step delays (ms): ");
-  Serial.print(LAZY_STEP_DELAY_MS);
-  Serial.print(", ");
-  Serial.print(PLAYFUL_STEP_DELAY_MS);
-  Serial.print(", ");
-  Serial.println(ZOOMIES_STEP_DELAY_MS);
-  Serial.print("Updated rest window (minutes): ");
-  Serial.print(AUTO_REST_MIN_MINUTES);
-  Serial.print(" to ");
-  Serial.println(AUTO_REST_MAX_MINUTES);
-
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handleWifiSave() {
-  String wifiSsid = server.arg("wifiSsid");
-  String wifiPass = server.arg("wifiPass");
-
-  if (wifiSsid.length() > WIFI_SSID_MAX_LEN) {
-    server.send(400, "text/plain", "Wi-Fi SSID must be 32 characters or fewer.");
-    return;
-  }
-
-  if (wifiPass.length() > WIFI_PASS_MAX_LEN) {
-    server.send(400, "text/plain", "Wi-Fi password must be 63 characters or fewer.");
-    return;
-  }
-
-  if (wifiSsid.length() > 0 && wifiPass.length() > 0 && wifiPass.length() < 8) {
-    server.send(400, "text/plain", "Wi-Fi password must be at least 8 characters when Wi-Fi is saved.");
-    return;
-  }
-
-  if (wifiSsid.length() == 0) {
-    wifiPass = "";
-  }
-
-  applyWifiCredentials(wifiSsid, wifiPass);
-
-  if (!saveWifiConfig()) {
-    server.send(500, "text/plain", "Updated Wi-Fi settings for this boot, but failed to save to LittleFS.");
-    return;
-  }
-
-  wifiSetupModeForced = false;
-  bootGestureWindowClosed = true;
-  networkBootStarted = false;
-  stationConnectAttemptActive = false;
-  stationWasConnected = false;
-
-  if (hasSavedWifiCredentials) {
-    WiFi.disconnect();
-    resetTimeState("Wi-Fi config updated");
-    Serial.println("Saved Wi-Fi settings updated. Starting AP+STA background connection.");
-  } else {
-    WiFi.disconnect();
-    WiFi.mode(WIFI_AP);
-    bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
-    resetTimeState("Wi-Fi credentials cleared by empty save");
-    networkBootStarted = true;
-    Serial.print("Wi-Fi credentials cleared by save. AP status: ");
-    Serial.println(apOk ? "READY" : "FAILED");
-  }
-
-  logScheduleDecisionIfChanged(SCHEDULE_ENABLED ? SCHEDULE_DECISION_TIME_INVALID : SCHEDULE_DECISION_DISABLED);
-
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handleScheduleSave() {
-  if (!server.hasArg("timezoneTz") || !server.hasArg("scheduleStart") || !server.hasArg("scheduleEnd")) {
-    server.send(400, "text/plain", "Missing one or more required schedule parameters.");
-    return;
-  }
-
-  String timezoneTz = server.arg("timezoneTz");
-  bool scheduleEnabled = server.hasArg("scheduleEnabled");
-  int scheduleStartMinute = 0;
-  int scheduleEndMinute = 0;
-
-  if (!validateTimezoneTz(timezoneTz)) {
-    server.send(400, "text/plain", "Timezone selection is invalid.");
-    return;
-  }
-
-  if (!parseTimeArg(server.arg("scheduleStart"), scheduleStartMinute) ||
-      !parseTimeArg(server.arg("scheduleEnd"), scheduleEndMinute)) {
-    server.send(400, "text/plain", "Schedule times must be valid HH:MM values.");
-    return;
-  }
-
-  if (!validateScheduleMinute(scheduleStartMinute) || !validateScheduleMinute(scheduleEndMinute)) {
-    server.send(400, "text/plain", "Schedule times must stay within one day.");
-    return;
-  }
-
-  applyTimezoneSetting(timezoneTz);
-  applyScheduleConfig(scheduleEnabled, scheduleStartMinute, scheduleEndMinute);
-
-  if (!saveScheduleConfig()) {
-    server.send(500, "text/plain", "Updated schedule settings for this boot, but failed to save to LittleFS.");
-    return;
-  }
-
-  if (timeValid && isTimeValid()) {
-    applyTimezoneIfNeeded();
-  }
-
-  scheduleWindowWasOpen = isScheduleWindowOpenNow();
-  if (scheduleWindowWasOpen &&
-      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
-    nextAutoSessionMs = millis();
-    scheduleStartPending = false;
-  } else {
-    scheduleStartPending = scheduleWindowWasOpen;
-  }
-
-  canAutoStartSessions();
-  Serial.println("Saved schedule settings updated.");
-
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handleClearWifi() {
-  applyWifiCredentials("", "");
-
-  if (!saveWifiConfig()) {
-    server.send(500, "text/plain", "Cleared Wi-Fi for this boot, but failed to save to LittleFS.");
-    return;
-  }
-
-  WiFi.disconnect();
-  WiFi.mode(WIFI_AP);
-  bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
-
-  wifiSetupModeForced = false;
-  bootGestureWindowClosed = true;
-  networkBootStarted = true;
-  stationConnectAttemptActive = false;
-  stationWasConnected = false;
-  resetTimeState("Saved Wi-Fi cleared");
-
-  Serial.print("Saved Wi-Fi cleared. AP status: ");
-  Serial.println(apOk ? "READY" : "FAILED");
-
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handleClearData() {
-  if (!littleFsReady) {
-    server.send(500, "text/plain", "LittleFS is not available, so saved data cannot be cleared safely.");
-    return;
-  }
-
-  applyDefaultConfig();
-
-  if (!clearAllSavedConfig()) {
-    server.send(500, "text/plain", "Failed to remove one or more saved config files from LittleFS.");
-    return;
-  }
-
-  WiFi.disconnect();
-  WiFi.mode(WIFI_AP);
-  bool apOk = WiFi.softAP(AP_SSID, AP_PASS);
-
-  wifiSetupModeForced = false;
-  bootGestureWindowClosed = true;
-  networkBootStarted = true;
-  stationConnectAttemptActive = false;
-  stationWasConnected = false;
-  forceSessionRequested = false;
-  parkRequested = false;
-  resetTimeState("All LittleFS config cleared");
-  logScheduleDecisionIfChanged(SCHEDULE_DECISION_DISABLED);
-
-  Serial.print("All saved config cleared. AP status: ");
-  Serial.println(apOk ? "READY" : "FAILED");
-
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handleStart() {
-  forceSessionRequested = true;
-  parkRequested = false;
-  nextAutoSessionMs = millis();
-  Serial.println("Manual Start Session Now requested.");
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handlePark() {
-  parkRequested = true;
-  forceSessionRequested = false;
-  nextAutoSessionMs = millis() + restDurationMs();
-  server.sendHeader("Location", "/", true);
-  server.send(303, "text/plain", "");
-}
-
-void handleNotFound() {
-  server.send(404, "text/plain", "Not found");
-}
-
 void setup() {
   Serial.begin(115200);
   randomSeed(analogRead(A0));
@@ -2085,6 +1232,7 @@ void setup() {
   server.on("/set", HTTP_GET, handleSet);
   server.on("/wifi", HTTP_POST, handleWifiSave);
   server.on("/schedule", HTTP_POST, handleScheduleSave);
+  server.on("/schedule-toggle", HTTP_POST, handleScheduleToggle);
   server.on("/clear-wifi", HTTP_POST, handleClearWifi);
   server.on("/clear-data", HTTP_POST, handleClearData);
   server.on("/start", HTTP_POST, handleStart);

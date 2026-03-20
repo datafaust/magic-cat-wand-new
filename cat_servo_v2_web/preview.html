@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Cat Toy Control Preview</title>
+  <script>
+    const UI_INPUT_BORDER_RADIUS_PX = 14;
+    const UI_PAGE_BACKGROUND_COLOR = "#000000";
+    const UI_PRIMARY_BUTTON_COLOR = "#d4af37";
+    const UI_CARD_BORDER_COLOR = "#d4af37";
+    document.documentElement.style.setProperty("--input-radius", UI_INPUT_BORDER_RADIUS_PX + "px");
+    document.documentElement.style.setProperty("--page-background", UI_PAGE_BACKGROUND_COLOR);
+    document.documentElement.style.setProperty("--primary-button", UI_PRIMARY_BUTTON_COLOR);
+    document.documentElement.style.setProperty("--card-border", UI_CARD_BORDER_COLOR);
+  </script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 780px;
+      margin: 24px auto;
+      padding: 0 16px;
+      line-height: 1.45;
+      background: var(--page-background, #d9f3f0);
+    }
+
+    button,
+    input,
+    select {
+      font-family: Arial, sans-serif;
+    }
+
+    .card {
+      border: 1px solid var(--card-border, #8b6b4f);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      background: #111;
+      color: #f5e7a1;
+    }
+
+    .hint {
+      background: #f7f7f7;
+      border-left: 4px solid #4f6d4a;
+    }
+
+    .meta {
+      color: #d8d8d8;
+      font-size: 14px;
+    }
+
+    .actions form {
+      display: inline-block;
+      margin: 8px 8px 0 0;
+    }
+
+    .schedule-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-top: 16px;
+    }
+
+    .schedule-end {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 16px;
+    }
+
+    .status {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+
+    details summary {
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details[open] summary {
+      margin-bottom: 12px;
+    }
+
+    label {
+      display: block;
+      margin-top: 12px;
+      font-weight: 600;
+    }
+
+    input[type="number"],
+    input[type="time"],
+    input[type="text"],
+    input[type="password"],
+    select {
+      width: 100%;
+      padding: 10px;
+      font-size: 16px;
+      box-sizing: border-box;
+      border-radius: var(--input-radius, 14px);
+    }
+
+    button {
+      margin-top: 16px;
+      padding: 12px 16px;
+      font-size: 16px;
+      border-radius: 10px;
+      border: 0;
+      cursor: pointer;
+      background: var(--primary-button, #f7efb0);
+      color: #111;
+    }
+
+    h1 {
+      text-align: center;
+      color: #d4af37;
+    }
+
+    .secondary {
+      background: #ececec;
+      color: #111;
+    }
+
+    .danger {
+      background: #b64332;
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <h1>Cat Toy Control</h1>
+
+  <div class="card">
+    <details>
+      <summary>Cat Toy Control Information</summary>
+      <div class="status">
+        <div><strong>Current mode:</strong> Playful</div>
+        <div><strong>Runtime state:</strong> Resting</div>
+        <div><strong>Current servo window:</strong> 25&deg; to 155&deg;</div>
+        <div><strong>Current rest:</strong> 90&deg;</div>
+        <div><strong>Current swing from rest:</strong> up to 65&deg; each side</div>
+        <div><strong>Auto rest window:</strong> 2 to 5 min</div>
+        <div><strong>Wi-Fi state:</strong> AP + STA connected to MyHomeWiFi (192.168.1.22)</div>
+        <div><strong>Time state:</strong> Local time valid</div>
+        <div><strong>Local time:</strong> 2025-02-24 09:15:02</div>
+        <div><strong>Timezone:</strong> Eastern</div>
+        <div><strong>Schedule:</strong> Inside allowed schedule window</div>
+        <div><strong>Daily schedule:</strong> 09:00 to 10:00</div>
+        <div><strong>Second schedule:</strong> Disabled</div>
+        <div><strong>Next auto session timer:</strong> 97 s</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card actions">
+    <strong>Manual control</strong>
+    <p class="meta">Start now forces the next session immediately, even outside the saved schedule. Park ends the current session as soon as the sketch reaches an interrupt check and returns the servo to rest.</p>
+    <form><button type="button">Start Session Now</button></form>
+    <form><button type="button">Park At Rest</button></form>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Servo Configuration</summary>
+      <p class="meta">Servo limits must keep max &gt; min with at least 20 degrees of spread. Rest remains auto-centered in the safe window.</p>
+      <form>
+      <label for="min">Left limit / minimum angle (SERVO_MIN_DEG)</label>
+      <input id="min" name="min" type="number" min="0" max="170" value="25">
+
+      <label for="max">Right limit / maximum angle (SERVO_MAX_DEG)</label>
+      <input id="max" name="max" type="number" min="10" max="180" value="155">
+
+      <label for="lazyDelay">Lazy speed delay in ms</label>
+      <input id="lazyDelay" name="lazyDelay" type="number" min="2" max="25" value="10">
+
+      <label for="playfulDelay">Playful speed delay in ms</label>
+      <input id="playfulDelay" name="playfulDelay" type="number" min="2" max="25" value="6">
+
+      <label for="zoomiesDelay">Zoomies speed delay in ms</label>
+      <input id="zoomiesDelay" name="zoomiesDelay" type="number" min="2" max="25" value="4">
+
+      <label for="restMinMinutes">Minimum rest between sessions in minutes</label>
+      <input id="restMinMinutes" name="restMinMinutes" type="number" min="1" max="240" value="2">
+
+      <label for="restMaxMinutes">Maximum rest between sessions in minutes</label>
+      <input id="restMaxMinutes" name="restMaxMinutes" type="number" min="1" max="240" value="5">
+
+        <button type="button">Save Motion Settings</button>
+      </form>
+    </details>
+  </div>
+
+  <div class="card">
+    <strong>Wi-Fi</strong>
+    <p class="meta">Use the boot gesture Lazy -> Playful -> Lazy during the first 4 seconds after boot to keep the toy in AP-only Wi-Fi setup mode for that boot.</p>
+    <form id="wifiForm">
+      <label for="wifiSsid">Home Wi-Fi SSID</label>
+      <input id="wifiSsid" name="wifiSsid" type="text" maxlength="32" value="MyHomeWiFi">
+
+      <label for="wifiPass">Home Wi-Fi password</label>
+      <input id="wifiPass" name="wifiPass" type="password" maxlength="63" value="password123">
+    </form>
+    <div class="schedule-actions">
+      <button type="submit" form="wifiForm">Save Wi-Fi</button>
+      <form><button class="danger" type="button">Clear Saved Wi-Fi</button></form>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>Schedule</strong>
+    <p class="meta">Schedule is currently disabled. Save Schedule updates the timezone and daily windows without changing that state.</p>
+    <p class="meta">This toy supports a maximum of two saved daily schedules.</p>
+    <p class="meta">Each window treats matching start and end times as all day. Overnight windows are supported for both windows.</p>
+    <form id="scheduleForm">
+      <label for="timezoneTz">Timezone</label>
+      <select id="timezoneTz" name="timezoneTz">
+        <option selected>Eastern</option>
+        <option>Central</option>
+        <option>Mountain</option>
+        <option>Arizona</option>
+        <option>Pacific</option>
+        <option>Alaska</option>
+        <option>Hawaii</option>
+      </select>
+
+      <label for="scheduleStart">Daily start</label>
+      <input id="scheduleStart" name="scheduleStart" type="time" value="09:00">
+
+      <label for="scheduleEnd">Daily end</label>
+      <input id="scheduleEnd" name="scheduleEnd" type="time" value="10:00">
+
+      <input id="scheduleSecondEnabled" name="scheduleSecondEnabled" type="hidden" value="0">
+
+      <div class="schedule-end">
+        <button class="secondary" id="addSecondScheduleButton" type="button">&#43; &#128197;</button>
+      </div>
+
+      <div id="secondScheduleBlock" style="display:none">
+        <div class="schedule-actions">
+          <strong>Second schedule</strong>
+          <div style="margin-left:auto">
+            <button class="secondary" id="removeSecondScheduleButton" type="button">&#8722; &#128197;</button>
+          </div>
+        </div>
+
+        <label for="scheduleSecondStart">Daily start</label>
+        <input id="scheduleSecondStart" name="scheduleSecondStart" type="time" value="18:00">
+
+        <label for="scheduleSecondEnd">Daily end</label>
+        <input id="scheduleSecondEnd" name="scheduleSecondEnd" type="time" value="19:00">
+      </div>
+
+    </form>
+
+    <div class="schedule-actions">
+      <button type="submit" form="scheduleForm">Save Schedule</button>
+      <form><button type="button">Enable Schedule</button></form>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>Maintenance</strong>
+    <p class="meta">This deletes all saved motion, Wi-Fi, and schedule data from LittleFS, including the legacy config file, and resets this boot to default settings.</p>
+    <form><button class="danger" type="button">Clear All Saved Data</button></form>
+  </div>
+
+  <div class="card meta">
+    Connect to Wi-Fi <strong>CatToy-Setup</strong> and browse to <strong>http://192.168.4.1</strong>. The local AP stays available even when station Wi-Fi is configured.
+  </div>
+
+  <script>
+    function setSecondScheduleVisible(show) {
+      var block = document.getElementById("secondScheduleBlock");
+      var flag = document.getElementById("scheduleSecondEnabled");
+      var add = document.getElementById("addSecondScheduleButton");
+
+      if (!block || !flag || !add) return;
+
+      block.style.display = show ? "block" : "none";
+      flag.value = show ? "1" : "0";
+      add.style.display = show ? "none" : "inline-block";
+    }
+
+    document.getElementById("addSecondScheduleButton").addEventListener("click", function () {
+      setSecondScheduleVisible(true);
+    });
+
+    document.getElementById("removeSecondScheduleButton").addEventListener("click", function () {
+      setSecondScheduleVisible(false);
+    });
+  </script>
+</body>
+</html>
