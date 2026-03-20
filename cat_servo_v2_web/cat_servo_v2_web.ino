@@ -60,6 +60,9 @@ const int DEFAULT_AUTO_REST_MAX_MINUTES = 5;
 const bool DEFAULT_SCHEDULE_ENABLED = false;
 const int DEFAULT_SCHEDULE_START_MINUTE = 9 * 60;
 const int DEFAULT_SCHEDULE_END_MINUTE = 17 * 60;
+const bool DEFAULT_SCHEDULE_SECOND_ENABLED = false;
+const int DEFAULT_SCHEDULE_SECOND_START_MINUTE = 18 * 60;
+const int DEFAULT_SCHEDULE_SECOND_END_MINUTE = 19 * 60;
 const char* DEFAULT_TIMEZONE_TZ = "EST5EDT,M3.2.0/2,M11.1.0/2";
 
 ESP8266WebServer server(80);
@@ -89,6 +92,9 @@ char TIMEZONE_TZ[TIMEZONE_MAX_LEN + 1] = "EST5EDT,M3.2.0/2,M11.1.0/2";
 bool SCHEDULE_ENABLED = DEFAULT_SCHEDULE_ENABLED;
 int SCHEDULE_START_MINUTE = DEFAULT_SCHEDULE_START_MINUTE;
 int SCHEDULE_END_MINUTE = DEFAULT_SCHEDULE_END_MINUTE;
+bool SCHEDULE_SECOND_ENABLED = DEFAULT_SCHEDULE_SECOND_ENABLED;
+int SCHEDULE_SECOND_START_MINUTE = DEFAULT_SCHEDULE_SECOND_START_MINUTE;
+int SCHEDULE_SECOND_END_MINUTE = DEFAULT_SCHEDULE_SECOND_END_MINUTE;
 
 enum PlayMode {
   MODE_LAZY,
@@ -502,9 +508,9 @@ int stepDegForMode(PlayMode mode) {
 
 unsigned long sessionDurationMsForMode(PlayMode mode) {
   switch (mode) {
-    case MODE_LAZY: return randRangeUL(20000UL, 35000UL);
-    case MODE_PLAYFUL: return randRangeUL(30000UL, 50000UL);
-    case MODE_ZOOMIES: return randRangeUL(40000UL, 65000UL);
+    case MODE_LAZY: return randRangeUL(30000UL, 45000UL);
+    case MODE_PLAYFUL: return randRangeUL(40000UL, 60000UL);
+    case MODE_ZOOMIES: return randRangeUL(50000UL, 75000UL);
   }
   return 30000UL;
 }
@@ -641,6 +647,20 @@ String formatMinuteOfDay(int minuteOfDay) {
   return String(buf);
 }
 
+String scheduleWindowLabel(int startMinute, int endMinute) {
+  String label = formatMinuteOfDay(startMinute);
+  label += " to ";
+  label += formatMinuteOfDay(endMinute);
+
+  if (startMinute == endMinute) {
+    label += " (all day)";
+  } else if (startMinute > endMinute) {
+    label += " (overnight)";
+  }
+
+  return label;
+}
+
 bool parseTimeArg(const String& value, int& minuteOut) {
   if (value.length() != 5 || value[2] != ':') return false;
 
@@ -677,10 +697,31 @@ void applyTimezoneSetting(const String& tz) {
   timezoneApplied = false;
 }
 
-void applyScheduleConfig(bool enabled, int startMinute, int endMinute) {
+void applyScheduleConfig(bool enabled, int startMinute, int endMinute,
+                         bool secondEnabled, int secondStartMinute, int secondEndMinute) {
   SCHEDULE_ENABLED = enabled;
   SCHEDULE_START_MINUTE = startMinute;
   SCHEDULE_END_MINUTE = endMinute;
+  SCHEDULE_SECOND_ENABLED = secondEnabled;
+  SCHEDULE_SECOND_START_MINUTE = secondStartMinute;
+  SCHEDULE_SECOND_END_MINUTE = secondEndMinute;
+}
+
+void refreshScheduleRuntimeStateAfterConfigChange(bool allowImmediateStart) {
+  scheduleWindowWasOpen = isScheduleWindowOpenNow();
+
+  if (!allowImmediateStart) {
+    scheduleStartPending = false;
+    return;
+  }
+
+  if (scheduleWindowWasOpen &&
+      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
+    nextAutoSessionMs = millis();
+    scheduleStartPending = false;
+  } else {
+    scheduleStartPending = scheduleWindowWasOpen;
+  }
 }
 
 void applyDefaultConfig() {
@@ -689,7 +730,12 @@ void applyDefaultConfig() {
   applyRestWindowMinutes(DEFAULT_AUTO_REST_MIN_MINUTES, DEFAULT_AUTO_REST_MAX_MINUTES);
   applyWifiCredentials("", "");
   applyTimezoneSetting(DEFAULT_TIMEZONE_TZ);
-  applyScheduleConfig(DEFAULT_SCHEDULE_ENABLED, DEFAULT_SCHEDULE_START_MINUTE, DEFAULT_SCHEDULE_END_MINUTE);
+  applyScheduleConfig(DEFAULT_SCHEDULE_ENABLED,
+                      DEFAULT_SCHEDULE_START_MINUTE,
+                      DEFAULT_SCHEDULE_END_MINUTE,
+                      DEFAULT_SCHEDULE_SECOND_ENABLED,
+                      DEFAULT_SCHEDULE_SECOND_START_MINUTE,
+                      DEFAULT_SCHEDULE_SECOND_END_MINUTE);
 }
 
 bool clearAllSavedConfig() {
@@ -736,6 +782,14 @@ bool isMinuteWithinScheduleWindow(int currentMinute, int startMinute, int endMin
   return currentMinute >= startMinute || currentMinute < endMinute;
 }
 
+bool isScheduleWindowSetOpenNow(int currentMinute, int startMinute, int endMinute,
+                                bool secondEnabled, int secondStartMinute, int secondEndMinute) {
+  if (isMinuteWithinScheduleWindow(currentMinute, startMinute, endMinute)) return true;
+  if (!secondEnabled) return false;
+
+  return isMinuteWithinScheduleWindow(currentMinute, secondStartMinute, secondEndMinute);
+}
+
 bool isScheduleWindowOpenNow() {
   if (!SCHEDULE_ENABLED) return true;
   if (!timeValid || !isTimeValid()) return false;
@@ -743,7 +797,12 @@ bool isScheduleWindowOpenNow() {
   int currentMinute = currentLocalMinuteOfDay();
   if (currentMinute < 0) return false;
 
-  return isMinuteWithinScheduleWindow(currentMinute, SCHEDULE_START_MINUTE, SCHEDULE_END_MINUTE);
+  return isScheduleWindowSetOpenNow(currentMinute,
+                                    SCHEDULE_START_MINUTE,
+                                    SCHEDULE_END_MINUTE,
+                                    SCHEDULE_SECOND_ENABLED,
+                                    SCHEDULE_SECOND_START_MINUTE,
+                                    SCHEDULE_SECOND_END_MINUTE);
 }
 
 void applyTimezoneIfNeeded() {
@@ -1154,6 +1213,12 @@ bool saveScheduleConfig() {
   json += String(SCHEDULE_START_MINUTE);
   json += ",\"scheduleEndMinute\":";
   json += String(SCHEDULE_END_MINUTE);
+  json += ",\"scheduleSecondEnabled\":";
+  json += SCHEDULE_SECOND_ENABLED ? "true" : "false";
+  json += ",\"scheduleSecondStartMinute\":";
+  json += String(SCHEDULE_SECOND_START_MINUTE);
+  json += ",\"scheduleSecondEndMinute\":";
+  json += String(SCHEDULE_SECOND_END_MINUTE);
   json += "}\n";
 
   return writeJsonFile(SCHEDULE_CONFIG_PATH, json);
@@ -1289,6 +1354,9 @@ void loadScheduleConfig() {
 
   int savedScheduleStartMinute = SCHEDULE_START_MINUTE;
   int savedScheduleEndMinute = SCHEDULE_END_MINUTE;
+  bool savedScheduleSecondEnabled = SCHEDULE_SECOND_ENABLED;
+  int savedScheduleSecondStartMinute = SCHEDULE_SECOND_START_MINUTE;
+  int savedScheduleSecondEndMinute = SCHEDULE_SECOND_END_MINUTE;
   bool savedScheduleEnabled = SCHEDULE_ENABLED;
   String savedTimezoneTz = TIMEZONE_TZ;
 
@@ -1302,6 +1370,9 @@ void loadScheduleConfig() {
   bool hasScheduleEnabled = extractJsonBool(json, "scheduleEnabled", savedScheduleEnabled);
   bool hasScheduleStart = extractJsonInt(json, "scheduleStartMinute", savedScheduleStartMinute);
   bool hasScheduleEnd = extractJsonInt(json, "scheduleEndMinute", savedScheduleEndMinute);
+  bool hasScheduleSecondEnabled = extractJsonBool(json, "scheduleSecondEnabled", savedScheduleSecondEnabled);
+  bool hasScheduleSecondStart = extractJsonInt(json, "scheduleSecondStartMinute", savedScheduleSecondStartMinute);
+  bool hasScheduleSecondEnd = extractJsonInt(json, "scheduleSecondEndMinute", savedScheduleSecondEndMinute);
 
   if (hasScheduleStart && !validateScheduleMinute(savedScheduleStartMinute)) {
     Serial.println("Saved schedule start minute invalid. Using default schedule start.");
@@ -1313,10 +1384,26 @@ void loadScheduleConfig() {
     savedScheduleEndMinute = SCHEDULE_END_MINUTE;
   }
 
+  if (hasScheduleSecondStart && !validateScheduleMinute(savedScheduleSecondStartMinute)) {
+    Serial.println("Saved second schedule start minute invalid. Using default second schedule start.");
+    savedScheduleSecondStartMinute = SCHEDULE_SECOND_START_MINUTE;
+  }
+
+  if (hasScheduleSecondEnd && !validateScheduleMinute(savedScheduleSecondEndMinute)) {
+    Serial.println("Saved second schedule end minute invalid. Using default second schedule end.");
+    savedScheduleSecondEndMinute = SCHEDULE_SECOND_END_MINUTE;
+  }
+
   applyTimezoneSetting(savedTimezoneTz);
 
-  if (hasScheduleEnabled || hasScheduleStart || hasScheduleEnd) {
-    applyScheduleConfig(savedScheduleEnabled, savedScheduleStartMinute, savedScheduleEndMinute);
+  if (hasScheduleEnabled || hasScheduleStart || hasScheduleEnd ||
+      hasScheduleSecondEnabled || hasScheduleSecondStart || hasScheduleSecondEnd) {
+    applyScheduleConfig(savedScheduleEnabled,
+                        savedScheduleStartMinute,
+                        savedScheduleEndMinute,
+                        savedScheduleSecondEnabled,
+                        savedScheduleSecondStartMinute,
+                        savedScheduleSecondEndMinute);
   }
 
   Serial.print("Loaded timezone: ");
@@ -1327,7 +1414,14 @@ void loadScheduleConfig() {
   Serial.print(SCHEDULE_ENABLED ? "enabled " : "disabled ");
   Serial.print(formatMinuteOfDay(SCHEDULE_START_MINUTE));
   Serial.print(" to ");
-  Serial.println(formatMinuteOfDay(SCHEDULE_END_MINUTE));
+  Serial.print(formatMinuteOfDay(SCHEDULE_END_MINUTE));
+  if (SCHEDULE_SECOND_ENABLED) {
+    Serial.print(" and ");
+    Serial.print(formatMinuteOfDay(SCHEDULE_SECOND_START_MINUTE));
+    Serial.print(" to ");
+    Serial.print(formatMinuteOfDay(SCHEDULE_SECOND_END_MINUTE));
+  }
+  Serial.println();
 }
 
 bool canAutoStartSessions() {
@@ -1551,16 +1645,12 @@ String htmlSelectedAttr(bool selected) {
   return selected ? F(" selected") : String("");
 }
 
-String htmlCheckedAttr(bool checked) {
-  return checked ? F(" checked") : String("");
-}
-
 String htmlPage() {
   PlayMode mode = readModeSwitch();
   unsigned long now = millis();
 
   String page;
-  page.reserve(9000);
+  page.reserve(9800);
 
   page += F(
     "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1608,14 +1698,13 @@ String htmlPage() {
   page += timezoneLabelForTz(TIMEZONE_TZ);
   page += F("</div><div><strong>Schedule:</strong> ");
   page += scheduleDecisionReasonName(lastScheduleDecisionReason);
-  page += F("</div><div><strong>Schedule window:</strong> ");
-  page += formatMinuteOfDay(SCHEDULE_START_MINUTE);
-  page += F(" to ");
-  page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
-  if (SCHEDULE_START_MINUTE == SCHEDULE_END_MINUTE) {
-    page += F(" (all day)");
-  } else if (SCHEDULE_START_MINUTE > SCHEDULE_END_MINUTE) {
-    page += F(" (overnight)");
+  page += F("</div><div><strong>Schedule window 1:</strong> ");
+  page += scheduleWindowLabel(SCHEDULE_START_MINUTE, SCHEDULE_END_MINUTE);
+  page += F("</div><div><strong>Schedule window 2:</strong> ");
+  if (SCHEDULE_SECOND_ENABLED) {
+    page += scheduleWindowLabel(SCHEDULE_SECOND_START_MINUTE, SCHEDULE_SECOND_END_MINUTE);
+  } else {
+    page += F("Disabled");
   }
   page += F("</div>");
   page += wifiDiagnosticsHtml(now);
@@ -1687,7 +1776,7 @@ String htmlPage() {
   page += F("<p class='meta'>Servo limits must keep max &gt; min with at least 20 degrees of spread. Rest remains auto-centered in the safe window.</p>");
   page += F("</div>");
 
-  page += F("<div class='card'><strong>Wi-Fi and schedule</strong>");
+  page += F("<div class='card'><strong>Wi-Fi</strong>");
   page += F("<form action='/wifi' method='post'>");
   page += F("<label for='wifiSsid'>Home Wi-Fi SSID</label>");
   page += F("<input id='wifiSsid' name='wifiSsid' type='text' maxlength='32' value='");
@@ -1701,7 +1790,10 @@ String htmlPage() {
   page += F("<button type='submit'>Save Wi-Fi</button>");
   page += F("</form>");
   page += F("<form action='/clear-wifi' method='post'><button class='danger' type='submit'>Clear Saved Wi-Fi</button></form>");
+  page += F("<p class='meta'>Use the boot gesture Lazy -> Playful -> Lazy during the first 4 seconds after boot to keep the toy in AP-only Wi-Fi setup mode for that boot.</p>");
+  page += F("</div>");
 
+  page += F("<div class='card'><strong>Schedule</strong>");
   page += F("<form action='/schedule' method='post'>");
   page += F("<label for='timezoneTz'>Timezone</label><select id='timezoneTz' name='timezoneTz'>");
   for (size_t i = 0; i < sizeof(TIMEZONE_OPTIONS) / sizeof(TIMEZONE_OPTIONS[0]); i++) {
@@ -1715,24 +1807,40 @@ String htmlPage() {
   }
   page += F("</select>");
 
-  page += F("<label><input name='scheduleEnabled' type='checkbox' value='1'");
-  page += htmlCheckedAttr(SCHEDULE_ENABLED);
-  page += F("> Enable scheduled auto-start</label>");
-
-  page += F("<label for='scheduleStart'>Daily schedule start</label>");
+  page += F("<label for='scheduleStart'>Daily schedule window 1 start</label>");
   page += F("<input id='scheduleStart' name='scheduleStart' type='time' value='");
   page += formatMinuteOfDay(SCHEDULE_START_MINUTE);
   page += F("'>");
 
-  page += F("<label for='scheduleEnd'>Daily schedule end</label>");
+  page += F("<label for='scheduleEnd'>Daily schedule window 1 end</label>");
   page += F("<input id='scheduleEnd' name='scheduleEnd' type='time' value='");
   page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
   page += F("'>");
 
+  page += F("<label><input name='scheduleSecondEnabled' type='checkbox' value='1'");
+  if (SCHEDULE_SECOND_ENABLED) page += F(" checked");
+  page += F("> Enable second daily window</label>");
+
+  page += F("<label for='scheduleSecondStart'>Daily schedule window 2 start</label>");
+  page += F("<input id='scheduleSecondStart' name='scheduleSecondStart' type='time' value='");
+  page += formatMinuteOfDay(SCHEDULE_SECOND_START_MINUTE);
+  page += F("'>");
+
+  page += F("<label for='scheduleSecondEnd'>Daily schedule window 2 end</label>");
+  page += F("<input id='scheduleSecondEnd' name='scheduleSecondEnd' type='time' value='");
+  page += formatMinuteOfDay(SCHEDULE_SECOND_END_MINUTE);
+  page += F("'>");
+
   page += F("<button type='submit'>Save Schedule</button>");
   page += F("</form>");
-  page += F("<p class='meta'>Use the boot gesture Lazy -> Playful -> Lazy during the first 4 seconds after boot to keep the toy in AP-only Wi-Fi setup mode for that boot.</p>");
-  page += F("<p class='meta'>If start and end times match, the schedule is treated as all day. Overnight windows are supported.</p>");
+  page += F("<form action='/schedule-toggle' method='post'>");
+  page += F("<button class='secondary' type='submit'>");
+  page += (SCHEDULE_ENABLED ? F("Disable Schedule") : F("Enable Schedule"));
+  page += F("</button></form>");
+  page += F("<p class='meta'>Schedule is currently ");
+  page += (SCHEDULE_ENABLED ? F("enabled") : F("disabled"));
+  page += F(". Save Schedule updates the timezone and daily windows without changing that state.</p>");
+  page += F("<p class='meta'>Each window treats matching start and end times as all day. Overnight windows are supported for both windows.</p>");
   page += F("</div>");
 
   page += F("<div class='card'><strong>Maintenance</strong>");
@@ -1884,15 +1992,18 @@ void handleWifiSave() {
 }
 
 void handleScheduleSave() {
-  if (!server.hasArg("timezoneTz") || !server.hasArg("scheduleStart") || !server.hasArg("scheduleEnd")) {
+  if (!server.hasArg("timezoneTz") || !server.hasArg("scheduleStart") || !server.hasArg("scheduleEnd") ||
+      !server.hasArg("scheduleSecondStart") || !server.hasArg("scheduleSecondEnd")) {
     server.send(400, "text/plain", "Missing one or more required schedule parameters.");
     return;
   }
 
   String timezoneTz = server.arg("timezoneTz");
-  bool scheduleEnabled = server.hasArg("scheduleEnabled");
   int scheduleStartMinute = 0;
   int scheduleEndMinute = 0;
+  bool scheduleSecondEnabled = server.hasArg("scheduleSecondEnabled");
+  int scheduleSecondStartMinute = 0;
+  int scheduleSecondEndMinute = 0;
 
   if (!validateTimezoneTz(timezoneTz)) {
     server.send(400, "text/plain", "Timezone selection is invalid.");
@@ -1900,18 +2011,26 @@ void handleScheduleSave() {
   }
 
   if (!parseTimeArg(server.arg("scheduleStart"), scheduleStartMinute) ||
-      !parseTimeArg(server.arg("scheduleEnd"), scheduleEndMinute)) {
+      !parseTimeArg(server.arg("scheduleEnd"), scheduleEndMinute) ||
+      !parseTimeArg(server.arg("scheduleSecondStart"), scheduleSecondStartMinute) ||
+      !parseTimeArg(server.arg("scheduleSecondEnd"), scheduleSecondEndMinute)) {
     server.send(400, "text/plain", "Schedule times must be valid HH:MM values.");
     return;
   }
 
-  if (!validateScheduleMinute(scheduleStartMinute) || !validateScheduleMinute(scheduleEndMinute)) {
+  if (!validateScheduleMinute(scheduleStartMinute) || !validateScheduleMinute(scheduleEndMinute) ||
+      !validateScheduleMinute(scheduleSecondStartMinute) || !validateScheduleMinute(scheduleSecondEndMinute)) {
     server.send(400, "text/plain", "Schedule times must stay within one day.");
     return;
   }
 
   applyTimezoneSetting(timezoneTz);
-  applyScheduleConfig(scheduleEnabled, scheduleStartMinute, scheduleEndMinute);
+  applyScheduleConfig(SCHEDULE_ENABLED,
+                      scheduleStartMinute,
+                      scheduleEndMinute,
+                      scheduleSecondEnabled,
+                      scheduleSecondStartMinute,
+                      scheduleSecondEndMinute);
 
   if (!saveScheduleConfig()) {
     server.send(500, "text/plain", "Updated schedule settings for this boot, but failed to save to LittleFS.");
@@ -1922,17 +2041,31 @@ void handleScheduleSave() {
     applyTimezoneIfNeeded();
   }
 
-  scheduleWindowWasOpen = isScheduleWindowOpenNow();
-  if (scheduleWindowWasOpen &&
-      controllerState == STATE_RESTING && !forceSessionRequested && !parkRequested) {
-    nextAutoSessionMs = millis();
-    scheduleStartPending = false;
-  } else {
-    scheduleStartPending = scheduleWindowWasOpen;
-  }
+  refreshScheduleRuntimeStateAfterConfigChange(SCHEDULE_ENABLED);
 
   canAutoStartSessions();
   Serial.println("Saved schedule settings updated.");
+
+  server.sendHeader("Location", "/", true);
+  server.send(303, "text/plain", "");
+}
+
+void handleScheduleToggle() {
+  applyScheduleConfig(!SCHEDULE_ENABLED,
+                      SCHEDULE_START_MINUTE,
+                      SCHEDULE_END_MINUTE,
+                      SCHEDULE_SECOND_ENABLED,
+                      SCHEDULE_SECOND_START_MINUTE,
+                      SCHEDULE_SECOND_END_MINUTE);
+
+  if (!saveScheduleConfig()) {
+    server.send(500, "text/plain", "Updated schedule enabled state for this boot, but failed to save to LittleFS.");
+    return;
+  }
+
+  refreshScheduleRuntimeStateAfterConfigChange(SCHEDULE_ENABLED);
+  canAutoStartSessions();
+  Serial.println(SCHEDULE_ENABLED ? "Schedule enabled." : "Schedule disabled.");
 
   server.sendHeader("Location", "/", true);
   server.send(303, "text/plain", "");
@@ -2085,6 +2218,7 @@ void setup() {
   server.on("/set", HTTP_GET, handleSet);
   server.on("/wifi", HTTP_POST, handleWifiSave);
   server.on("/schedule", HTTP_POST, handleScheduleSave);
+  server.on("/schedule-toggle", HTTP_POST, handleScheduleToggle);
   server.on("/clear-wifi", HTTP_POST, handleClearWifi);
   server.on("/clear-data", HTTP_POST, handleClearData);
   server.on("/start", HTTP_POST, handleStart);
