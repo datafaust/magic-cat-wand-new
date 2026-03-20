@@ -1661,13 +1661,25 @@ String htmlPage() {
     ".hint{background:#f7f7f7;border-left:4px solid #4f6d4a;}"
     ".meta{color:#444;font-size:14px;}"
     ".actions form{display:inline-block;margin:8px 8px 0 0;}"
+    ".schedule-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:16px;}"
     "label{display:block;margin-top:12px;font-weight:600;}"
     "input[type=number],input[type=time],input[type=text],input[type=password],select{width:100%;padding:10px;font-size:16px;box-sizing:border-box;}"
     "button{margin-top:16px;padding:12px 16px;font-size:16px;border-radius:10px;border:0;cursor:pointer;}"
     ".secondary{background:#ececec;color:#111;}"
     ".danger{background:#b64332;color:#fff;}"
     ".status{display:grid;grid-template-columns:1fr;gap:6px;}"
-    "</style></head><body>"
+    "</style>"
+    "<script>"
+    "function setSecondScheduleVisible(show){"
+    "var block=document.getElementById('secondScheduleBlock');"
+    "var flag=document.getElementById('scheduleSecondEnabled');"
+    "var add=document.getElementById('addSecondScheduleButton');"
+    "if(!block||!flag||!add)return;"
+    "block.style.display=show?'block':'none';"
+    "flag.value=show?'1':'0';"
+    "add.style.display=show?'none':'inline-block';"
+    "}"
+    "</script></head><body>"
     "<h1>Cat Toy Control</h1>"
   );
 
@@ -1817,10 +1829,18 @@ String htmlPage() {
   page += formatMinuteOfDay(SCHEDULE_END_MINUTE);
   page += F("'>");
 
-  page += F("<label><input name='scheduleSecondEnabled' type='checkbox' value='1'");
-  if (SCHEDULE_SECOND_ENABLED) page += F(" checked");
-  page += F("> Enable second daily window</label>");
+  page += F("<input id='scheduleSecondEnabled' name='scheduleSecondEnabled' type='hidden' value='");
+  page += (SCHEDULE_SECOND_ENABLED ? F("1") : F("0"));
+  page += F("'>");
 
+  page += F("<button class='secondary' id='addSecondScheduleButton' type='button' onclick='setSecondScheduleVisible(true)'");
+  if (SCHEDULE_SECOND_ENABLED) page += F(" style='display:none'");
+  page += F(">Add second schedule</button>");
+
+  page += F("<div id='secondScheduleBlock'");
+  if (!SCHEDULE_SECOND_ENABLED) page += F(" style='display:none'");
+  page += F(">");
+  page += F("<div class='schedule-actions'><strong>Second schedule</strong><button class='secondary' type='button' onclick='setSecondScheduleVisible(false)'>Remove</button></div>");
   page += F("<label for='scheduleSecondStart'>Daily schedule window 2 start</label>");
   page += F("<input id='scheduleSecondStart' name='scheduleSecondStart' type='time' value='");
   page += formatMinuteOfDay(SCHEDULE_SECOND_START_MINUTE);
@@ -1830,8 +1850,9 @@ String htmlPage() {
   page += F("<input id='scheduleSecondEnd' name='scheduleSecondEnd' type='time' value='");
   page += formatMinuteOfDay(SCHEDULE_SECOND_END_MINUTE);
   page += F("'>");
+  page += F("</div>");
 
-  page += F("<button type='submit'>Save Schedule</button>");
+  page += F("<div class='schedule-actions'><button type='submit'>Save Schedule</button></div>");
   page += F("</form>");
   page += F("<form action='/schedule-toggle' method='post'>");
   page += F("<button class='secondary' type='submit'>");
@@ -2001,7 +2022,7 @@ void handleScheduleSave() {
   String timezoneTz = server.arg("timezoneTz");
   int scheduleStartMinute = 0;
   int scheduleEndMinute = 0;
-  bool scheduleSecondEnabled = server.hasArg("scheduleSecondEnabled");
+  bool scheduleSecondEnabled = (server.arg("scheduleSecondEnabled") == "1");
   int scheduleSecondStartMinute = 0;
   int scheduleSecondEndMinute = 0;
 
